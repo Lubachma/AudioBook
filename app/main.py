@@ -71,10 +71,15 @@ def convert_book(job_id: str) -> dict:
     job = jobs.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Livre introuvable.")
-    if job["status"] != "extracted":
+    if job["status"] not in ("extracted", "error"):
         raise HTTPException(
             status_code=409,
             detail=f"Conversion impossible depuis le statut '{job['status']}'.",
+        )
+    if not jobs.text_path(job_id).exists():
+        raise HTTPException(
+            status_code=409,
+            detail="Texte extrait absent, veuillez ré-uploader le PDF.",
         )
     jobs.enqueue(job_id, "convert")
     return {"id": job_id, "status": "converting"}

@@ -23,7 +23,7 @@ class Settings:
     """Instance mutable pour permettre aux tests de surcharger les valeurs."""
 
     def __init__(self) -> None:
-        self.data_dir = Path(os.environ.get("DATA_DIR", "data"))
+        self.data_dir = Path(os.environ.get("DATA_DIR", "data")).resolve()
         self.elevenlabs_api_key = os.environ.get("ELEVENLABS_API_KEY", "")
         self.elevenlabs_voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
         self.elevenlabs_model_id = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")

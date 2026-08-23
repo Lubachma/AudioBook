@@ -111,20 +111,24 @@ function updateCard(book) {
   body.innerHTML = "";
   delete body.dataset.ready;
 
-  if (book.status === "extracted") {
-    const note = document.createElement("div");
-    note.className = "muted";
-    note.textContent = "Vérifiez l'estimation ci-dessus, puis lancez la conversion.";
+  const makeConvertBtn = (label) => {
     const btn = document.createElement("button");
     btn.className = "btn-primary";
-    btn.textContent = "Convertir en audio";
+    btn.textContent = label;
     btn.onclick = async () => {
       btn.disabled = true;
       const resp = await fetch(`/api/books/${book.id}/convert`, { method: "POST" });
       if (!resp.ok) { alert((await resp.json()).detail); btn.disabled = false; }
       refresh();
     };
-    body.append(note, btn);
+    return btn;
+  };
+
+  if (book.status === "extracted") {
+    const note = document.createElement("div");
+    note.className = "muted";
+    note.textContent = "Vérifiez l'estimation ci-dessus, puis lancez la conversion.";
+    body.append(note, makeConvertBtn("Convertir en audio"));
   } else if (book.status === "converting") {
     const bar = document.createElement("progress");
     bar.max = book.total_chunks || 1;
@@ -165,6 +169,9 @@ function updateCard(book) {
     msg.className = "warn";
     msg.textContent = book.error || "Erreur inconnue.";
     body.appendChild(msg);
+    // Reprise possible si le texte a été extrait (les segments déjà générés
+    // ne seront pas re-facturés)
+    if (book.char_count > 0) body.appendChild(makeConvertBtn("Réessayer la conversion"));
   }
 
   // Bouton supprimer toujours disponible (sauf pendant conversion)

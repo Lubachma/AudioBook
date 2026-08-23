@@ -102,6 +102,26 @@ def test_convert_requires_extracted_status(client):
     assert resp.status_code == 404
 
 
+def test_convert_allowed_from_error_status(client):
+    """Un job en erreur (ex : quota ou ffmpeg) avec texte extrait peut être relancé."""
+    job_id = jobs.create_job(title="livre", language="fr")
+    jobs.text_path(job_id).write_text("Du texte à convertir.", encoding="utf-8")
+    jobs.update_job(job_id, status="error", char_count=21, error="quota atteint")
+
+    resp = client.post(f"/api/books/{job_id}/convert")
+    assert resp.status_code == 200
+    assert jobs.get_job(job_id)["status"] == "done"
+
+
+def test_convert_error_without_extracted_text_rejected(client):
+    """Job en erreur SANS texte extrait (ex : PDF scanné) -> 409, il faut ré-uploader."""
+    job_id = jobs.create_job(title="scan", language="fr")
+    jobs.update_job(job_id, status="error", error="PDF scanné")
+
+    resp = client.post(f"/api/books/{job_id}/convert")
+    assert resp.status_code == 409
+
+
 def test_index_served(client):
     resp = client.get("/")
     assert resp.status_code == 200

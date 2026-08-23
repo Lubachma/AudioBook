@@ -186,16 +186,20 @@ def run_conversion(job_id: str) -> None:
     update_job(job_id, status="converting", total_chunks=len(chunks), done_chunks=0, error=None)
 
     for i, chunk in enumerate(chunks, start=1):
-        synthesize_with_retry(
-            chunk,
-            out_dir / f"chunk_{i:04d}.mp3",
-            api_key=settings.elevenlabs_api_key,
-            voice_id=settings.elevenlabs_voice_id,
-            model_id=settings.elevenlabs_model_id,
-            language_code=job["language"] or None,
-            stability=settings.voice_stability,
-            similarity_boost=settings.voice_similarity_boost,
-        )
+        chunk_file = out_dir / f"chunk_{i:04d}.mp3"
+        # Un chunk déjà présent (tentative précédente interrompue) n'est pas
+        # re-synthétisé : la reprise ne re-facture pas ElevenLabs.
+        if not (chunk_file.exists() and chunk_file.stat().st_size > 0):
+            synthesize_with_retry(
+                chunk,
+                chunk_file,
+                api_key=settings.elevenlabs_api_key,
+                voice_id=settings.elevenlabs_voice_id,
+                model_id=settings.elevenlabs_model_id,
+                language_code=job["language"] or None,
+                stability=settings.voice_stability,
+                similarity_boost=settings.voice_similarity_boost,
+            )
         update_job(job_id, done_chunks=i)
 
     merge_chunks(out_dir, audio_path(job_id))
@@ -204,10 +208,14 @@ def run_conversion(job_id: str) -> None:
 
 
 def merge_chunks(chunk_directory: Path, out_path: Path) -> None:
-    """Assemble les chunks MP3 sans ré-encodage via le demuxer concat de ffmpeg."""
+    """Assemble les chunks MP3 sans ré-encodage via le demuxer concat de ffmpeg.
+
+    Les chemins de la liste sont en absolu : ffmpeg les résout par rapport au
+    dossier du fichier liste, pas au répertoire courant du processus.
+    """
     files = sorted(chunk_directory.glob("chunk_*.mp3"))
     list_file = chunk_directory / "concat.txt"
-    list_file.write_text("".join(f"file '{f}'\n" for f in files), encoding="utf-8")
+    list_file.write_text("".join(f"file '{f.resolve()}'\n" for f in files), encoding="utf-8")
     subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(out_path)],
         check=True,
