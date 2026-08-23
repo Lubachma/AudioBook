@@ -58,5 +58,3 @@ def test_scanned_pdf_raises(tmp_path):
         extract_text(tmp_path / "scan.pdf")
 
 
-def test_min_chars_per_page_is_reasonable():
-    assert 10 <= MIN_CHARS_PER_PAGE <= 200

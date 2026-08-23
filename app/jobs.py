@@ -13,13 +13,14 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .chunker import chunk_text
 from .config import settings
-from .pdf_extract import ScannedPdfError, extract_text
+from .pdf_extract import extract_text
 from .tts import synthesize_edge_with_retry, synthesize_with_retry
 
 SCHEMA = """
@@ -108,15 +109,18 @@ def delete_job(job_id: str) -> bool:
 
 
 def recover_interrupted() -> None:
-    """Au redémarrage : les conversions interrompues redeviennent relançables."""
+    """Au redémarrage : conversions interrompues relançables, extractions relancées."""
     with _connect() as conn:
         conn.execute(
             "UPDATE jobs SET status = 'extracted' WHERE status = 'converting'"
         )
-        conn.execute(
-            "UPDATE jobs SET status = 'error', error = ? WHERE status = 'extracting'",
-            ("Serveur redémarré pendant l'extraction, veuillez ré-uploader le PDF.",),
-        )
+        extracting = conn.execute(
+            "SELECT id FROM jobs WHERE status = 'extracting'"
+        ).fetchall()
+    # Le PDF est encore sur disque : on relance l'extraction plutôt que de
+    # demander un re-upload (qui orphelinait l'ancien PDF).
+    for row in extracting:
+        enqueue(row["id"], "extract")
 
 
 # ---------------------------------------------------------------- chemins
@@ -153,6 +157,14 @@ def enqueue(job_id: str, action: str) -> None:
     _queue.put((job_id, action))
 
 
+def _mark_error_safe(job_id: str, message: str) -> None:
+    """Marque un job en erreur sans jamais tuer le thread worker."""
+    try:
+        update_job(job_id, status="error", error=message)
+    except Exception:  # noqa: BLE001 - la boucle du worker doit survivre à tout
+        traceback.print_exc()
+
+
 def _worker_loop() -> None:
     while True:
         job_id, action = _queue.get()
@@ -161,10 +173,8 @@ def _worker_loop() -> None:
                 run_extraction(job_id)
             elif action == "convert":
                 run_conversion(job_id)
-        except ScannedPdfError as exc:
-            update_job(job_id, status="error", error=str(exc))
         except Exception as exc:  # noqa: BLE001 - toute erreur doit remonter dans l'UI
-            update_job(job_id, status="error", error=str(exc))
+            _mark_error_safe(job_id, str(exc))
         finally:
             _queue.task_done()
 
@@ -181,7 +191,8 @@ def run_extraction(job_id: str) -> None:
 def run_conversion(job_id: str) -> None:
     """Texte -> chunks MP3 (ElevenLabs ou edge-tts) -> assemblage ffmpeg en un MP3."""
     job = get_job(job_id)
-    if job is None:
+    if job is None or job["status"] == "done":
+        # Garde anti double-traitement : un livre terminé n'est jamais re-synthétisé.
         return
 
     free_mb = shutil.disk_usage(settings.data_dir).free / (1024 * 1024)

@@ -199,3 +199,52 @@ def test_run_conversion_default_engine_fallback(data_dir, monkeypatch):
     jobs.run_conversion(job_id)
 
     assert used == ["edge"]
+
+
+def test_run_conversion_noop_on_done_job(data_dir, monkeypatch):
+    """Garde anti double-traitement : un livre terminé n'est jamais re-synthétisé."""
+    job_id = _make_book()
+    jobs.update_job(job_id, status="done")
+
+    monkeypatch.setattr(
+        jobs, "synthesize_with_retry", lambda *a, **kw: pytest.fail("TTS appelé sur un livre terminé")
+    )
+    monkeypatch.setattr(
+        jobs, "synthesize_edge_with_retry", lambda *a, **kw: pytest.fail("TTS appelé sur un livre terminé")
+    )
+    jobs.run_conversion(job_id)  # ne doit rien faire, ni lever d'erreur
+
+
+def test_zero_byte_chunk_is_resynthesized(data_dir, monkeypatch):
+    """Un chunk vide (0 octet) n'est pas considéré comme terminé à la reprise."""
+    job_id = _make_book()
+    jobs.update_job(job_id, status="extracted", char_count=38)
+    monkeypatch.setattr(settings, "chunk_max_chars", 20)  # 2 chunks
+
+    chunk_directory = jobs.chunk_dir(job_id)
+    chunk_directory.mkdir(parents=True)
+    (chunk_directory / "chunk_0001.mp3").write_bytes(b"")  # résidu vide
+
+    calls = []
+    monkeypatch.setattr(
+        jobs, "synthesize_with_retry", lambda t, o, **kw: (calls.append(t), o.write_bytes(b"X"))
+    )
+    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
+
+    jobs.run_conversion(job_id)
+
+    assert len(calls) == 2  # les deux chunks ont été synthétisés
+
+
+def test_recover_interrupted_reenqueues_extractions(data_dir, monkeypatch):
+    """Un redémarrage pendant l'extraction la relance (le PDF est encore là)."""
+    job_id = jobs.create_job(title="t", language="fr")
+    assert jobs.get_job(job_id)["status"] == "extracting"
+
+    enqueued = []
+    monkeypatch.setattr(jobs, "enqueue", lambda jid, action: enqueued.append((jid, action)))
+
+    jobs.recover_interrupted()
+
+    assert jobs.get_job(job_id)["status"] == "extracting"  # pas d'erreur "ré-uploadez"
+    assert (job_id, "extract") in enqueued

@@ -7,6 +7,9 @@ pour ne jamais couper une phrase au milieu d'un mot.
 import re
 
 # Fin de phrase : . ! ? … suivi d'un espace, en tenant compte des guillemets/parenthèses fermants.
+# Heuristique connue : coupe aussi après « … » sans ponctuation finale ou les
+# abréviations ("M. Dupont") — l'ordre du texte est préservé, seule la prosodie
+# aux frontières de chunks peut en pâtir légèrement.
 _SENTENCE_END = re.compile(r"(?<=[.!?…»\"')\]])\s+")
 
 

@@ -206,3 +206,55 @@ def test_upload_stores_engine(client, tmp_path):
     assert resp.status_code == 201
     book = client.get("/api/books").json()[0]
     assert book["engine"] == "edge"
+
+
+def test_convert_sets_converting_status_before_enqueue(client, monkeypatch):
+    """Le statut transitoire empêche un second clic de re-facturer le livre."""
+    job_id = jobs.create_job(title="livre", language="fr", engine="elevenlabs")
+    jobs.text_path(job_id).write_text("Du texte.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=9)
+
+    queued = []
+    monkeypatch.setattr(jobs, "enqueue", lambda jid, action: queued.append((jid, action)))
+
+    resp = client.post(f"/api/books/{job_id}/convert")
+    assert resp.status_code == 200
+    assert jobs.get_job(job_id)["status"] == "converting"  # posé avant même l'exécution
+    assert queued == [(job_id, "convert")]
+
+    # Un second clic pendant que le job attend dans la file est refusé
+    resp2 = client.post(f"/api/books/{job_id}/convert")
+    assert resp2.status_code == 409
+
+
+def test_second_convert_after_done_rejected(client, tmp_path):
+    pdf = _make_pdf(tmp_path / "livre4.pdf")
+    with pdf.open("rb") as f:
+        job_id = client.post(
+            "/api/books", files={"file": ("livre4.pdf", f, "application/pdf")}, data={"language": "fr"}
+        ).json()["id"]
+    assert client.post(f"/api/books/{job_id}/convert").status_code == 200
+    assert jobs.get_job(job_id)["status"] == "done"
+    assert client.post(f"/api/books/{job_id}/convert").status_code == 409
+
+
+def test_delete_during_conversion_rejected(client):
+    job_id = jobs.create_job(title="livre", language="fr")
+    jobs.update_job(job_id, status="converting")
+    assert client.delete(f"/api/books/{job_id}").status_code == 409
+    assert jobs.get_job(job_id) is not None  # toujours là
+
+
+def test_invalid_engine_rejected_on_upload(client, tmp_path):
+    pdf = _make_pdf(tmp_path / "livre5.pdf")
+    with pdf.open("rb") as f:
+        resp = client.post(
+            "/api/books",
+            files={"file": ("livre5.pdf", f, "application/pdf")},
+            data={"language": "fr", "engine": "Edge"},  # typo -> rejet, pas de facturation ElevenLabs
+        )
+    assert resp.status_code == 400
+
+
+def test_invalid_engine_rejected_on_voices(client):
+    assert client.get("/api/voices?engine=Edge").status_code == 400

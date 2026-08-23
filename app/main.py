@@ -1,5 +1,6 @@
 """API FastAPI : upload de PDF, suivi des conversions, streaming audio, UI statique."""
 
+import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +24,8 @@ _voices_cache: dict[str, tuple[float, list[dict]]] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.ensure_dirs()
+    if shutil.which("ffmpeg") is None:
+        print("AVERTISSEMENT : ffmpeg introuvable — les conversions échoueront à l'assemblage.")
     jobs.start_worker()
     yield
 
@@ -50,6 +53,9 @@ def get_voices(engine: str = "elevenlabs") -> dict:
     engine=edge        -> voix neurales Microsoft (gratuit), liste filtrée fr/en
     engine=elevenlabs  -> voix du compte ElevenLabs ; liste vide si clé absente ou API en échec
     """
+    if engine not in ("edge", "elevenlabs"):
+        raise HTTPException(status_code=400, detail=f"Moteur inconnu : '{engine}'.")
+
     now = time.time()
     cached = _voices_cache.get(engine)
     if cached and now - cached[0] < VOICES_CACHE_TTL:
@@ -59,7 +65,8 @@ def get_voices(engine: str = "elevenlabs") -> dict:
         try:
             voices = list_edge_voices()
         except Exception:  # noqa: BLE001 - service externe non critique
-            voices = []
+            # Échec non mis en cache : la prochaine visite retentera.
+            return {"voices": []}
     else:
         if not settings.elevenlabs_api_key:
             return {"voices": []}
@@ -81,6 +88,8 @@ async def create_book(
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Seuls les fichiers PDF sont acceptés.")
+    if engine and engine not in ("edge", "elevenlabs"):
+        raise HTTPException(status_code=400, detail=f"Moteur inconnu : '{engine}'.")
 
     job_id = jobs.create_job(
         title=Path(file.filename).stem, language=language, voice_id=voice_id, engine=engine
@@ -125,6 +134,9 @@ def convert_book(job_id: str) -> dict:
             status_code=409,
             detail="Texte extrait absent, veuillez ré-uploader le PDF.",
         )
+    # Statut posé AVANT l'enqueue : un second clic est refusé (409) pendant
+    # que le job attend dans la file — sinon il serait converti deux fois.
+    jobs.update_job(job_id, status="converting", error=None)
     jobs.enqueue(job_id, "convert")
     return {"id": job_id, "status": "converting"}
 
@@ -140,8 +152,15 @@ def get_audio(job_id: str) -> FileResponse:
 
 @app.delete("/api/books/{job_id}", status_code=204)
 def delete_book(job_id: str) -> None:
-    if not jobs.delete_job(job_id):
+    job = jobs.get_job(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail="Livre introuvable.")
+    if job["status"] == "converting":
+        raise HTTPException(
+            status_code=409,
+            detail="Conversion en cours : attendez la fin ou le prochain statut d'erreur.",
+        )
+    jobs.delete_job(job_id)
 
 
 # L'UI statique est montée en dernier pour ne pas masquer les routes /api.

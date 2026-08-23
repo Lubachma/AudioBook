@@ -69,9 +69,15 @@ def synthesize_chunk(
                 body = response.read().decode("utf-8", "replace")[:500]
                 _raise_for_status(response.status_code, body)
             out_path = Path(out_path)
-            with out_path.open("wb") as f:
-                for data in response.iter_bytes():
-                    f.write(data)
+            try:
+                with out_path.open("wb") as f:
+                    for data in response.iter_bytes():
+                        f.write(data)
+            except Exception:
+                # Pas de fichier partiel : sinon la reprise le croirait complet
+                # et ffmpeg assemblerait un MP3 corrompu.
+                out_path.unlink(missing_ok=True)
+                raise
     return out_path
 
 
@@ -138,7 +144,12 @@ def synthesize_edge_chunk(text: str, out_path: str | Path, *, voice: str) -> Pat
     async def _run() -> None:
         await edge_tts.Communicate(text, voice).save(str(out_path))
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except Exception:
+        # Pas de fichier partiel : sinon la reprise le croirait complet.
+        out_path.unlink(missing_ok=True)
+        raise
     return out_path
 
 

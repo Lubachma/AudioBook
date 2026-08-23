@@ -1,16 +1,19 @@
 [Unit]
-Description=PDF to Audiobook (FastAPI + ElevenLabs)
-After=network-online.target
+Description=PDF to Audiobook (FastAPI + ElevenLabs/edge-tts)
+After=network-online.target tailscaled.service
 Wants=network-online.target
+Requires=tailscaled.service
 
 [Service]
 Type=simple
 # Adapter l'utilisateur et les chemins à votre installation
 User=kali
 WorkingDirectory=/home/kali/audiobook
-ExecStart=/home/kali/audiobook/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Écoute uniquement sur l'IP Tailscale : jamais exposé au LAN ni à internet
+ExecStart=/bin/sh -c 'exec /home/kali/audiobook/.venv/bin/uvicorn app.main:app --host $(tailscale ip -4) --port 8000'
 Restart=always
 RestartSec=3
+NoNewPrivileges=yes
 # Journalisation dans journald : journalctl -u audiobook -f
 
 [Install]
