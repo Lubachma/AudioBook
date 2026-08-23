@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Livres audio</title>
+<style>
+  :root { --bg: #0f1115; --card: #1a1e27; --text: #e8eaf0; --muted: #9aa3b2; --accent: #5b8cff; --danger: #e05d5d; --ok: #4caf7d; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 16px; }
+  h1 { font-size: 1.3rem; margin: 0; }
+  main { max-width: 640px; margin: 0 auto; padding: 0 16px 48px; }
+  .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+  .muted { color: var(--muted); font-size: 0.85rem; }
+  form { display: flex; flex-direction: column; gap: 10px; }
+  input[type=file], select, button { font-size: 1rem; padding: 10px; border-radius: 8px; border: 1px solid #333a4a; background: #12151c; color: var(--text); }
+  button { cursor: pointer; border: none; }
+  .btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
+  .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .badge.extracting, .badge.converting { background: #3a4a6b; color: #cfe0ff; }
+  .badge.extracted { background: #6b5a2a; color: #ffe9a8; }
+  .badge.done { background: #24503c; color: #a8f0cd; }
+  .badge.error { background: #5a2a2a; color: #ffb3b3; }
+  progress { width: 100%; height: 8px; margin-top: 8px; }
+  audio { width: 100%; margin-top: 8px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  .warn { color: #ffcf7d; }
+  a { color: var(--accent); }
+  #config-banner { display: none; }
+</style>
+</head>
+<body>
+<header><h1>📖 → 🎧 Livres audio</h1><div class="muted" id="voice-info"></div></header>
+<main>
+  <div class="card" id="config-banner">
+    <span class="warn">⚠ Clé API ElevenLabs non configurée sur le serveur (.env).</span>
+  </div>
+
+  <div class="card">
+    <form id="upload-form">
+      <input type="file" id="file" accept="application/pdf" required>
+      <select id="language">
+        <option value="fr">Français</option>
+        <option value="en">English</option>
+      </select>
+      <button type="submit" class="btn-primary">Ajouter le PDF</button>
+    </form>
+  </div>
+
+  <div id="books"></div>
+</main>
+
+<script>
+const STATUS_LABELS = { extracting: "Extraction…", extracted: "Prêt", converting: "Conversion…", done: "Terminé", error: "Erreur" };
+const cards = new Map(); // id -> élément DOM, pour ne pas recréer les lecteurs en cours d'écoute
+let monthlyQuota = 100000;
+
+async function loadConfig() {
+  const cfg = await (await fetch("/api/config")).json();
+  monthlyQuota = cfg.monthly_quota_chars;
+  document.getElementById("voice-info").textContent = "Voix : " + cfg.voice_id + " · " + cfg.model_id;
+  document.getElementById("language").value = cfg.default_language;
+  if (!cfg.api_key_configured) document.getElementById("config-banner").style.display = "block";
+}
+
+document.getElementById("upload-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fileInput = document.getElementById("file");
+  if (!fileInput.files.length) return;
+  const data = new FormData();
+  data.append("file", fileInput.files[0]);
+  data.append("language", document.getElementById("language").value);
+  const resp = await fetch("/api/books", { method: "POST", body: data });
+  if (!resp.ok) { alert((await resp.json()).detail || "Échec de l'upload"); return; }
+  fileInput.value = "";
+  refresh();
+});
+
+function formatChars(n) {
+  const pct = (n / monthlyQuota * 100).toFixed(0);
+  return n.toLocaleString("fr-FR") + " caractères ≈ " + pct + " % du quota mensuel";
+}
+
+function buildCard(book) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.dataset.id = book.id;
+  card.innerHTML = `
+    <div><strong></strong></div>
+    <div class="row"><span class="badge"></span><span class="muted chars"></span></div>
+    <div class="body"></div>`;
+  card.querySelector("strong").textContent = book.title;
+  return card;
+}
+
+function updateCard(book) {
+  let card = cards.get(book.id);
+  if (!card) { card = buildCard(book); cards.set(book.id, card); document.getElementById("books").prepend(card); }
+
+  const badge = card.querySelector(".badge");
+  badge.className = "badge " + book.status;
+  badge.textContent = STATUS_LABELS[book.status] || book.status;
+
+  card.querySelector(".chars").textContent = book.char_count ? formatChars(book.char_count) : "";
+
+  const body = card.querySelector(".body");
+  // Ne jamais reconstruire le lecteur d'un livre terminé pendant l'écoute.
+  if (book.status === "done" && body.dataset.ready === "1") return;
+  body.innerHTML = "";
+  delete body.dataset.ready;
+
+  if (book.status === "extracted") {
+    const note = document.createElement("div");
+    note.className = "muted";
+    note.textContent = "Vérifiez l'estimation ci-dessus, puis lancez la conversion.";
+    const btn = document.createElement("button");
+    btn.className = "btn-primary";
+    btn.textContent = "Convertir en audio";
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const resp = await fetch(`/api/books/${book.id}/convert`, { method: "POST" });
+      if (!resp.ok) { alert((await resp.json()).detail); btn.disabled = false; }
+      refresh();
+    };
+    body.append(note, btn);
+  } else if (book.status === "converting") {
+    const bar = document.createElement("progress");
+    bar.max = book.total_chunks || 1;
+    bar.value = book.done_chunks;
+    const label = document.createElement("div");
+    label.className = "muted";
+    label.textContent = `${book.done_chunks} / ${book.total_chunks} segments`;
+    body.append(bar, label);
+  } else if (book.status === "done") {
+    body.dataset.ready = "1";
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.src = `/api/books/${book.id}/audio`;
+    const posKey = "pos_" + book.id;
+    audio.addEventListener("loadedmetadata", () => {
+      const saved = parseFloat(localStorage.getItem(posKey));
+      if (saved > 0 && saved < audio.duration - 10) audio.currentTime = saved;
+    });
+    audio.addEventListener("timeupdate", () => localStorage.setItem(posKey, audio.currentTime));
+    audio.addEventListener("ended", () => localStorage.removeItem(posKey));
+
+    const row = document.createElement("div");
+    row.className = "row";
+    const speed = document.createElement("select");
+    for (const v of [0.75, 1, 1.25, 1.5, 2]) {
+      const opt = document.createElement("option");
+      opt.value = v; opt.textContent = "×" + v;
+      if (v === 1) opt.selected = true;
+      speed.appendChild(opt);
+    }
+    speed.onchange = () => audio.playbackRate = parseFloat(speed.value);
+    const dl = document.createElement("a");
+    dl.href = audio.src; dl.download = book.title + ".mp3"; dl.textContent = "Télécharger";
+    row.append(speed, dl);
+    body.append(audio, row);
+  } else if (book.status === "error") {
+    const msg = document.createElement("div");
+    msg.className = "warn";
+    msg.textContent = book.error || "Erreur inconnue.";
+    body.appendChild(msg);
+  }
+
+  // Bouton supprimer toujours disponible (sauf pendant conversion)
+  if (book.status !== "converting") {
+    const row = body.querySelector(".row") || (() => { const r = document.createElement("div"); r.className = "row"; body.appendChild(r); return r; })();
+    if (!row.querySelector(".btn-danger")) {
+      const del = document.createElement("button");
+      del.className = "btn-danger";
+      del.textContent = "Supprimer";
+      del.onclick = async () => {
+        if (!confirm("Supprimer « " + book.title + " » ?")) return;
+        await fetch(`/api/books/${book.id}`, { method: "DELETE" });
+        cards.get(book.id)?.remove();
+        cards.delete(book.id);
+        refresh();
+      };
+      row.appendChild(del);
+    }
+  }
+}
+
+async function refresh() {
+  try {
+    const books = await (await fetch("/api/books")).json();
+    const seen = new Set();
+    for (const book of books) { seen.add(book.id); updateCard(book); }
+    for (const [id, card] of cards) if (!seen.has(id)) { card.remove(); cards.delete(id); }
+  } catch (e) { /* serveur injoignable : on réessaiera au prochain tick */ }
+}
+
+loadConfig().then(refresh);
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

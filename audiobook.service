@@ -1,0 +1,17 @@
+[Unit]
+Description=PDF to Audiobook (FastAPI + ElevenLabs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adapter l'utilisateur et les chemins à votre installation
+User=kali
+WorkingDirectory=/home/kali/audiobook
+ExecStart=/home/kali/audiobook/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+# Journalisation dans journald : journalctl -u audiobook -f
+
+[Install]
+WantedBy=multi-user.target
