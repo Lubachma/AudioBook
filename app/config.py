@@ -28,6 +28,8 @@ class Settings:
         self.elevenlabs_voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
         self.elevenlabs_model_id = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
         self.default_language = os.environ.get("DEFAULT_LANGUAGE", "fr")
+        self.default_engine = os.environ.get("DEFAULT_ENGINE", "edge")
+        self.default_edge_voice = os.environ.get("DEFAULT_EDGE_VOICE", "fr-FR-DeniseNeural")
         self.chunk_max_chars = _int("CHUNK_MAX_CHARS", 4000)
         self.max_upload_mb = _int("MAX_UPLOAD_MB", 100)
         self.voice_stability = _float("VOICE_STABILITY", 0.5)

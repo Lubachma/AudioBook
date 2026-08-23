@@ -19,7 +19,7 @@ def data_dir(tmp_path, monkeypatch):
 
 
 def _make_book():
-    job_id = jobs.create_job(title="test", language="fr")
+    job_id = jobs.create_job(title="test", language="fr", engine="elevenlabs")
     jobs.text_path(job_id).write_text("Première phrase. Deuxième phrase.", encoding="utf-8")
     return job_id
 
@@ -102,7 +102,7 @@ def test_create_job_stores_voice_id(data_dir):
 
 
 def test_run_conversion_uses_job_voice(data_dir, monkeypatch):
-    job_id = jobs.create_job(title="t", language="fr", voice_id="voix-du-job")
+    job_id = jobs.create_job(title="t", language="fr", voice_id="voix-du-job", engine="elevenlabs")
     jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
     jobs.update_job(job_id, status="extracted", char_count=11)
 
@@ -121,7 +121,7 @@ def test_run_conversion_uses_job_voice(data_dir, monkeypatch):
 
 
 def test_run_conversion_falls_back_to_default_voice(data_dir, monkeypatch):
-    job_id = jobs.create_job(title="t", language="fr")  # pas de voix choisie
+    job_id = jobs.create_job(title="t", language="fr", engine="elevenlabs")  # pas de voix choisie
     jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
     jobs.update_job(job_id, status="extracted", char_count=11)
 
@@ -137,3 +137,65 @@ def test_run_conversion_falls_back_to_default_voice(data_dir, monkeypatch):
     jobs.run_conversion(job_id)
 
     assert captured["voice_id"] == settings.elevenlabs_voice_id
+
+
+def test_init_db_migrates_adds_engine(tmp_path, monkeypatch):
+    """La colonne engine est ajoutée aux bases existantes (défaut elevenlabs)."""
+    settings.data_dir = tmp_path / "data"
+    settings.ensure_dirs()
+    with sqlite3.connect(settings.db_path) as conn:
+        conn.execute(
+            "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT NOT NULL, language TEXT NOT NULL,"
+            " status TEXT NOT NULL, char_count INTEGER NOT NULL DEFAULT 0,"
+            " total_chunks INTEGER NOT NULL DEFAULT 0, done_chunks INTEGER NOT NULL DEFAULT 0,"
+            " error TEXT, created_at TEXT NOT NULL, voice_id TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO jobs (id, title, language, status, created_at) VALUES ('abc', 't', 'fr', 'extracted', '2024-01-01')"
+        )
+
+    jobs.init_db()
+
+    assert jobs.get_job("abc")["engine"] == "elevenlabs"
+
+
+def test_run_conversion_dispatches_to_edge(data_dir, monkeypatch):
+    job_id = jobs.create_job(title="t", language="fr", voice_id="fr-FR-HenriNeural", engine="edge")
+    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=11)
+
+    captured = {}
+
+    def fake_edge(text, out_path, **kw):
+        captured.update(kw)
+        out_path.write_bytes(b"E")
+
+    monkeypatch.setattr(jobs, "synthesize_edge_with_retry", fake_edge)
+    monkeypatch.setattr(
+        jobs, "synthesize_with_retry", lambda *a, **kw: pytest.fail("ElevenLabs ne doit pas être appelé")
+    )
+    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
+
+    jobs.run_conversion(job_id)
+
+    assert captured["voice"] == "fr-FR-HenriNeural"
+    assert jobs.get_job(job_id)["status"] == "done"
+
+
+def test_run_conversion_default_engine_fallback(data_dir, monkeypatch):
+    """Job sans moteur explicite -> moteur par défaut de la config."""
+    monkeypatch.setattr(settings, "default_engine", "edge")
+    job_id = jobs.create_job(title="t", language="fr")
+    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=11)
+
+    used = []
+
+    monkeypatch.setattr(
+        jobs, "synthesize_edge_with_retry", lambda t, o, **kw: (used.append("edge"), o.write_bytes(b"E"))
+    )
+    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
+
+    jobs.run_conversion(job_id)
+
+    assert used == ["edge"]

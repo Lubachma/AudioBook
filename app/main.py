@@ -10,14 +10,14 @@ from fastapi.staticfiles import StaticFiles
 
 from . import jobs
 from .config import settings
-from .tts import TTSError, list_voices
+from .tts import TTSError, list_edge_voices, list_voices
 
 STATIC_DIR = Path(__file__).parent / "static"
 CHUNK_SIZE = 1 << 20  # 1 Mo
 VOICES_CACHE_TTL = 600  # secondes
 
-# Cache en mémoire de la liste des voix (évite un appel ElevenLabs par chargement de page)
-_voices_cache: tuple[float, list[dict]] | None = None
+# Cache en mémoire des listes de voix par moteur (évite un appel externe par chargement de page)
+_voices_cache: dict[str, tuple[float, list[dict]]] = {}
 
 
 @asynccontextmanager
@@ -38,23 +38,37 @@ def get_config() -> dict:
         "default_language": settings.default_language,
         "monthly_quota_chars": settings.monthly_quota_chars,
         "api_key_configured": bool(settings.elevenlabs_api_key),
+        "default_engine": settings.default_engine,
+        "default_edge_voice": settings.default_edge_voice,
     }
 
 
 @app.get("/api/voices")
-def get_voices() -> dict:
-    """Voix du compte ElevenLabs, avec cache. Liste vide si clé absente ou API en échec."""
-    global _voices_cache
+def get_voices(engine: str = "elevenlabs") -> dict:
+    """Voix du moteur demandé, avec cache par moteur.
+
+    engine=edge        -> voix neurales Microsoft (gratuit), liste filtrée fr/en
+    engine=elevenlabs  -> voix du compte ElevenLabs ; liste vide si clé absente ou API en échec
+    """
     now = time.time()
-    if _voices_cache and now - _voices_cache[0] < VOICES_CACHE_TTL:
-        return {"voices": _voices_cache[1]}
-    if not settings.elevenlabs_api_key:
-        return {"voices": []}
-    try:
-        voices = list_voices(settings.elevenlabs_api_key)
-    except TTSError:
-        return {"voices": []}
-    _voices_cache = (now, voices)
+    cached = _voices_cache.get(engine)
+    if cached and now - cached[0] < VOICES_CACHE_TTL:
+        return {"voices": cached[1]}
+
+    if engine == "edge":
+        try:
+            voices = list_edge_voices()
+        except Exception:  # noqa: BLE001 - service externe non critique
+            voices = []
+    else:
+        if not settings.elevenlabs_api_key:
+            return {"voices": []}
+        try:
+            voices = list_voices(settings.elevenlabs_api_key)
+        except TTSError:
+            return {"voices": []}
+
+    _voices_cache[engine] = (now, voices)
     return {"voices": voices}
 
 
@@ -63,11 +77,14 @@ async def create_book(
     file: UploadFile = File(...),
     language: str = Form("fr"),
     voice_id: str = Form(""),
+    engine: str = Form(""),
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Seuls les fichiers PDF sont acceptés.")
 
-    job_id = jobs.create_job(title=Path(file.filename).stem, language=language, voice_id=voice_id)
+    job_id = jobs.create_job(
+        title=Path(file.filename).stem, language=language, voice_id=voice_id, engine=engine
+    )
     pdf_path = jobs.pdf_path(job_id)
 
     max_bytes = settings.max_upload_mb * 1024 * 1024

@@ -1,12 +1,15 @@
-"""Client minimal pour l'API ElevenLabs (text-to-speech), avec retries.
+"""Client minimal pour l'API ElevenLabs (text-to-speech), avec retries,
+et moteur alternatif edge-tts (voix neurales Microsoft, gratuit).
 
-On utilise l'API HTTP directement (plutôt que le SDK) pour garder une
-dépendance légère et facilement mockable en tests.
+On utilise l'API HTTP directement pour ElevenLabs (plutôt que le SDK)
+pour garder une dépendance légère et facilement mockable en tests.
 """
 
+import asyncio
 import time
 from pathlib import Path
 
+import edge_tts
 import httpx
 
 API_BASE = "https://api.elevenlabs.io/v1/text-to-speech"
@@ -124,3 +127,51 @@ def synthesize_with_retry(
                 raise
             time.sleep(base_delay * 2**attempt)
     raise TTSError("Échec de synthèse après plusieurs tentatives.")  # pragma: no cover
+
+
+# ------------------------------------------------------------------ edge-tts
+
+def synthesize_edge_chunk(text: str, out_path: str | Path, *, voice: str) -> Path:
+    """Synthétise un chunk via edge-tts (voix neurales Microsoft, gratuit)."""
+    out_path = Path(out_path)
+
+    async def _run() -> None:
+        await edge_tts.Communicate(text, voice).save(str(out_path))
+
+    asyncio.run(_run())
+    return out_path
+
+
+def synthesize_edge_with_retry(
+    *args,
+    attempts: int = 3,
+    base_delay: float = 2.0,
+    **kwargs,
+) -> Path:
+    """Retry avec backoff exponentiel ; edge-tts lève des exceptions génériques."""
+    for attempt in range(attempts):
+        try:
+            return synthesize_edge_chunk(*args, **kwargs)
+        except Exception:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(base_delay * 2**attempt)
+    raise TTSError("Échec edge-tts après plusieurs tentatives.")  # pragma: no cover
+
+
+def _edge_display_name(voice: dict) -> str:
+    """'fr-FR-DeniseNeural' -> 'Denise (fr-FR, F)'."""
+    short = voice["ShortName"]
+    name = short.split("-")[-1].removesuffix("Neural")
+    gender = {"Female": "F", "Male": "M"}.get(voice.get("Gender", ""), "")
+    return f"{name} ({voice['Locale']}, {gender})" if gender else f"{name} ({voice['Locale']})"
+
+
+def list_edge_voices(locales: tuple[str, ...] = ("fr", "en")) -> list[dict]:
+    """Voix edge-tts filtrées par langue (fr/en par défaut), format simplifié."""
+    all_voices = asyncio.run(edge_tts.list_voices())
+    return [
+        {"voice_id": v["ShortName"], "name": _edge_display_name(v), "category": "edge"}
+        for v in all_voices
+        if v["Locale"].split("-")[0] in locales
+    ]

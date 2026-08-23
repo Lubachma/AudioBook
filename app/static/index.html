@@ -41,6 +41,10 @@
   <div class="card">
     <form id="upload-form">
       <input type="file" id="file" accept="application/pdf" required>
+      <select id="engine" title="Moteur de synthèse">
+        <option value="edge">Edge TTS (gratuit)</option>
+        <option value="elevenlabs">ElevenLabs (quota)</option>
+      </select>
       <select id="voice" title="Voix de lecture"></select>
       <select id="language">
         <option value="fr">Français</option>
@@ -62,15 +66,24 @@ let monthlyQuota = 100000;
 async function loadConfig() {
   const cfg = await (await fetch("/api/config")).json();
   monthlyQuota = cfg.monthly_quota_chars;
-  document.getElementById("voice-info").textContent = "Voix : " + cfg.voice_id + " · " + cfg.model_id;
+  document.getElementById("voice-info").textContent = "Modèle : " + cfg.model_id;
   document.getElementById("language").value = cfg.default_language;
   if (!cfg.api_key_configured) document.getElementById("config-banner").style.display = "block";
 
+  const engineSelect = document.getElementById("engine");
+  engineSelect.value = cfg.default_engine;
+  await loadVoices(cfg);
+  engineSelect.addEventListener("change", () => loadVoices(cfg));
+}
+
+async function loadVoices(cfg) {
+  const engine = document.getElementById("engine").value;
   const select = document.getElementById("voice");
-  const { voices } = await (await fetch("/api/voices")).json();
+  select.innerHTML = '<option value="">Chargement des voix…</option>';
+  const { voices } = await (await fetch("/api/voices?engine=" + engine)).json();
+  select.innerHTML = "";
   for (const v of voices) voiceNames.set(v.voice_id, v.name);
   if (voices.length) {
-    select.innerHTML = "";
     for (const v of voices) {
       const opt = document.createElement("option");
       opt.value = v.voice_id;
@@ -78,11 +91,12 @@ async function loadConfig() {
       select.appendChild(opt);
     }
   } else {
-    // API injoignable ou clé absente : on propose au moins la voix du .env
-    voiceNames.set(cfg.voice_id, "Voix par défaut");
-    select.innerHTML = `<option value="${cfg.voice_id}">Voix par défaut</option>`;
+    // Service injoignable ou clé absente : on propose au moins la voix par défaut
+    const fallback = engine === "edge" ? cfg.default_edge_voice : cfg.voice_id;
+    voiceNames.set(fallback, "Voix par défaut");
+    select.innerHTML = `<option value="${fallback}">Voix par défaut</option>`;
   }
-  select.value = cfg.voice_id;
+  select.value = engine === "edge" ? cfg.default_edge_voice : cfg.voice_id;
 }
 
 document.getElementById("upload-form").addEventListener("submit", async (e) => {
@@ -93,15 +107,17 @@ document.getElementById("upload-form").addEventListener("submit", async (e) => {
   data.append("file", fileInput.files[0]);
   data.append("language", document.getElementById("language").value);
   data.append("voice_id", document.getElementById("voice").value);
+  data.append("engine", document.getElementById("engine").value);
   const resp = await fetch("/api/books", { method: "POST", body: data });
   if (!resp.ok) { alert((await resp.json()).detail || "Échec de l'upload"); return; }
   fileInput.value = "";
   refresh();
 });
 
-function formatChars(n) {
-  const pct = (n / monthlyQuota * 100).toFixed(0);
-  return n.toLocaleString("fr-FR") + " caractères ≈ " + pct + " % du quota mensuel";
+function formatChars(book) {
+  if (book.engine === "edge") return book.char_count.toLocaleString("fr-FR") + " caractères (gratuit)";
+  const pct = (book.char_count / monthlyQuota * 100).toFixed(0);
+  return book.char_count.toLocaleString("fr-FR") + " caractères ≈ " + pct + " % du quota mensuel";
 }
 
 function buildCard(book) {
@@ -125,7 +141,7 @@ function updateCard(book) {
   badge.textContent = STATUS_LABELS[book.status] || book.status;
 
   card.querySelector(".voice").textContent = book.voice_id ? "🎙 " + (voiceNames.get(book.voice_id) || book.voice_id) : "";
-  card.querySelector(".chars").textContent = book.char_count ? formatChars(book.char_count) : "";
+  card.querySelector(".chars").textContent = book.char_count ? formatChars(book) : "";
 
   const body = card.querySelector(".body");
   // Ne jamais reconstruire le lecteur d'un livre terminé pendant l'écoute.

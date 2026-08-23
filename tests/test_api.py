@@ -16,6 +16,7 @@ def client(tmp_path, monkeypatch):
     settings.data_dir = tmp_path / "data"
     settings.ensure_dirs()
     settings.chunk_max_chars = 4000
+    monkeypatch.setattr(settings, "default_engine", "elevenlabs")
     jobs.init_db()  # le thread worker persiste entre les tests et ne le fait qu'une fois
 
     # Traitement synchrone des jobs pour des tests déterministes
@@ -131,7 +132,7 @@ def test_index_served(client):
 def test_voices_endpoint_lists_account_voices(client, monkeypatch):
     from app import main
 
-    monkeypatch.setattr(main, "_voices_cache", None)
+    monkeypatch.setattr(main, "_voices_cache", {})
     monkeypatch.setattr(settings, "elevenlabs_api_key", "cle-test")
     monkeypatch.setattr(
         main,
@@ -146,7 +147,7 @@ def test_voices_endpoint_lists_account_voices(client, monkeypatch):
 def test_voices_endpoint_without_key_returns_empty(client, monkeypatch):
     from app import main
 
-    monkeypatch.setattr(main, "_voices_cache", None)
+    monkeypatch.setattr(main, "_voices_cache", {})
     monkeypatch.setattr(settings, "elevenlabs_api_key", "")
 
     data = client.get("/api/voices").json()
@@ -156,7 +157,7 @@ def test_voices_endpoint_without_key_returns_empty(client, monkeypatch):
 def test_voices_endpoint_elevenlabs_failure_returns_empty(client, monkeypatch):
     from app import main, tts
 
-    monkeypatch.setattr(main, "_voices_cache", None)
+    monkeypatch.setattr(main, "_voices_cache", {})
     monkeypatch.setattr(settings, "elevenlabs_api_key", "cle-test")
 
     def boom(key):
@@ -178,3 +179,30 @@ def test_upload_stores_chosen_voice(client, tmp_path):
     assert resp.status_code == 201
     book = client.get("/api/books").json()[0]
     assert book["voice_id"] == "voix-choisie"
+
+
+def test_voices_endpoint_edge_engine(client, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main, "_voices_cache", {})
+    monkeypatch.setattr(
+        main,
+        "list_edge_voices",
+        lambda: [{"voice_id": "fr-FR-DeniseNeural", "name": "Denise (fr-FR, F)", "category": "edge"}],
+    )
+
+    data = client.get("/api/voices?engine=edge").json()
+    assert data["voices"][0]["voice_id"] == "fr-FR-DeniseNeural"
+
+
+def test_upload_stores_engine(client, tmp_path):
+    pdf = _make_pdf(tmp_path / "livre3.pdf")
+    with pdf.open("rb") as f:
+        resp = client.post(
+            "/api/books",
+            files={"file": ("livre3.pdf", f, "application/pdf")},
+            data={"language": "fr", "voice_id": "fr-FR-DeniseNeural", "engine": "edge"},
+        )
+    assert resp.status_code == 201
+    book = client.get("/api/books").json()[0]
+    assert book["engine"] == "edge"

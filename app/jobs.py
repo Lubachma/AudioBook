@@ -20,7 +20,7 @@ from pathlib import Path
 from .chunker import chunk_text
 from .config import settings
 from .pdf_extract import ScannedPdfError, extract_text
-from .tts import synthesize_with_retry
+from .tts import synthesize_edge_with_retry, synthesize_with_retry
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -33,12 +33,16 @@ CREATE TABLE IF NOT EXISTS jobs (
     done_chunks INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     created_at TEXT NOT NULL,
-    voice_id TEXT NOT NULL DEFAULT ''
+    voice_id TEXT NOT NULL DEFAULT '',
+    engine TEXT NOT NULL DEFAULT 'elevenlabs'
 )
 """
 
 # Colonnes ajoutées après la première version : appliquées aux bases existantes.
-MIGRATIONS = ("voice_id TEXT NOT NULL DEFAULT ''",)
+MIGRATIONS = (
+    "voice_id TEXT NOT NULL DEFAULT ''",
+    "engine TEXT NOT NULL DEFAULT 'elevenlabs'",
+)
 
 # Queue FIFO consommée par le thread worker ; actions : "extract" | "convert".
 _queue: queue.Queue[tuple[str, str]] = queue.Queue()
@@ -64,12 +68,13 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {column_def}")
 
 
-def create_job(title: str, language: str, voice_id: str = "") -> str:
+def create_job(title: str, language: str, voice_id: str = "", engine: str = "") -> str:
     job_id = uuid.uuid4().hex[:12]
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO jobs (id, title, language, status, created_at, voice_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (job_id, title, language, "extracting", datetime.now(timezone.utc).isoformat(), voice_id),
+            "INSERT INTO jobs (id, title, language, status, created_at, voice_id, engine)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (job_id, title, language, "extracting", datetime.now(timezone.utc).isoformat(), voice_id, engine),
         )
     return job_id
 
@@ -174,7 +179,7 @@ def run_extraction(job_id: str) -> None:
 
 
 def run_conversion(job_id: str) -> None:
-    """Texte -> chunks MP3 ElevenLabs -> assemblage ffmpeg en un seul MP3."""
+    """Texte -> chunks MP3 (ElevenLabs ou edge-tts) -> assemblage ffmpeg en un MP3."""
     job = get_job(job_id)
     if job is None:
         return
@@ -190,6 +195,8 @@ def run_conversion(job_id: str) -> None:
         update_job(job_id, status="error", error="Aucun texte à convertir.")
         return
 
+    engine = job["engine"] or settings.default_engine
+
     out_dir = chunk_dir(job_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     update_job(job_id, status="converting", total_chunks=len(chunks), done_chunks=0, error=None)
@@ -197,18 +204,25 @@ def run_conversion(job_id: str) -> None:
     for i, chunk in enumerate(chunks, start=1):
         chunk_file = out_dir / f"chunk_{i:04d}.mp3"
         # Un chunk déjà présent (tentative précédente interrompue) n'est pas
-        # re-synthétisé : la reprise ne re-facture pas ElevenLabs.
+        # re-synthétisé : la reprise ne re-facture pas le moteur TTS.
         if not (chunk_file.exists() and chunk_file.stat().st_size > 0):
-            synthesize_with_retry(
-                chunk,
-                chunk_file,
-                api_key=settings.elevenlabs_api_key,
-                voice_id=job["voice_id"] or settings.elevenlabs_voice_id,
-                model_id=settings.elevenlabs_model_id,
-                language_code=job["language"] or None,
-                stability=settings.voice_stability,
-                similarity_boost=settings.voice_similarity_boost,
-            )
+            if engine == "edge":
+                synthesize_edge_with_retry(
+                    chunk,
+                    chunk_file,
+                    voice=job["voice_id"] or settings.default_edge_voice,
+                )
+            else:
+                synthesize_with_retry(
+                    chunk,
+                    chunk_file,
+                    api_key=settings.elevenlabs_api_key,
+                    voice_id=job["voice_id"] or settings.elevenlabs_voice_id,
+                    model_id=settings.elevenlabs_model_id,
+                    language_code=job["language"] or None,
+                    stability=settings.voice_stability,
+                    similarity_boost=settings.voice_similarity_boost,
+                )
         update_job(job_id, done_chunks=i)
 
     merge_chunks(out_dir, audio_path(job_id))

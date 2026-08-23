@@ -1,14 +1,23 @@
 # PDF → Livre audio
 
-Web app privée : on dépose un PDF, il est lu à voix haute par ElevenLabs (voix naturelle, FR/EN) et devient un MP3 écoutable en streaming ou téléchargeable depuis un téléphone.
+Web app privée : on dépose un PDF, il est lu à voix haute (voix naturelle) et devient un MP3 écoutable en streaming ou téléchargeable depuis un téléphone.
 
 Prévue pour être auto-hébergée sur un Raspberry Pi 5 (Kali Linux) et accessible via Tailscale — rien n'est exposé sur internet.
+
+## Moteurs de synthèse vocale
+
+Deux moteurs, choisis **par livre** dans le formulaire :
+
+| Moteur | Coût | Qualité | Notes |
+|---|---|---|---|
+| **Edge TTS** (défaut) | Gratuit, illimité | Très bonnes voix neurales Microsoft (fr-FR-DeniseNeural, HenriNeural…) | API non officielle : peut casser sans prévenir ; pas de clonage vocal |
+| **ElevenLabs** | Payant au caractère | Top du marché + clonage de votre voix | Nécessite `ELEVENLABS_API_KEY` |
 
 ## Fonctionnement
 
 1. Upload d'un PDF via le navigateur → extraction et nettoyage du texte (en-têtes, numéros de page, césures).
-2. **Estimation du coût affichée avant conversion** (caractères vs quota mensuel du plan ElevenLabs).
-3. Clic sur « Convertir » → découpe en chunks ≤ 4000 caractères → synthèse ElevenLabs `eleven_multilingual_v2` → assemblage ffmpeg en un seul MP3.
+2. **Estimation affichée avant conversion** : gratuit pour Edge TTS, % du quota mensuel pour ElevenLabs.
+3. Clic sur « Convertir » → découpe en chunks ≤ 4000 caractères → synthèse → assemblage ffmpeg en un seul MP3. Reprise sans re-facturation si interrompu.
 4. Écoute dans le navigateur (reprise de position, vitesse de lecture) ou téléchargement.
 
 ## Développement local (Mac)

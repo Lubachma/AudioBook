@@ -2,6 +2,7 @@ fastapi>=0.110
 uvicorn[standard]
 pdfplumber
 httpx
+edge-tts
 python-multipart
 python-dotenv
 pytest
