@@ -32,9 +32,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     total_chunks INTEGER NOT NULL DEFAULT 0,
     done_chunks INTEGER NOT NULL DEFAULT 0,
     error TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    voice_id TEXT NOT NULL DEFAULT ''
 )
 """
+
+# Colonnes ajoutées après la première version : appliquées aux bases existantes.
+MIGRATIONS = ("voice_id TEXT NOT NULL DEFAULT ''",)
 
 # Queue FIFO consommée par le thread worker ; actions : "extract" | "convert".
 _queue: queue.Queue[tuple[str, str]] = queue.Queue()
@@ -53,14 +57,19 @@ def init_db() -> None:
     settings.ensure_dirs()
     with _connect() as conn:
         conn.execute(SCHEMA)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        for column_def in MIGRATIONS:
+            column_name = column_def.split()[0]
+            if column_name not in columns:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {column_def}")
 
 
-def create_job(title: str, language: str) -> str:
+def create_job(title: str, language: str, voice_id: str = "") -> str:
     job_id = uuid.uuid4().hex[:12]
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO jobs (id, title, language, status, created_at) VALUES (?, ?, ?, ?, ?)",
-            (job_id, title, language, "extracting", datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO jobs (id, title, language, status, created_at, voice_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, title, language, "extracting", datetime.now(timezone.utc).isoformat(), voice_id),
         )
     return job_id
 
@@ -194,7 +203,7 @@ def run_conversion(job_id: str) -> None:
                 chunk,
                 chunk_file,
                 api_key=settings.elevenlabs_api_key,
-                voice_id=settings.elevenlabs_voice_id,
+                voice_id=job["voice_id"] or settings.elevenlabs_voice_id,
                 model_id=settings.elevenlabs_model_id,
                 language_code=job["language"] or None,
                 stability=settings.voice_stability,

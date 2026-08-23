@@ -126,3 +126,55 @@ def test_index_served(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "Livres audio" in resp.text
+
+
+def test_voices_endpoint_lists_account_voices(client, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main, "_voices_cache", None)
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "cle-test")
+    monkeypatch.setattr(
+        main,
+        "list_voices",
+        lambda key: [{"voice_id": "v1", "name": "Alice", "category": "premade"}],
+    )
+
+    data = client.get("/api/voices").json()
+    assert data["voices"] == [{"voice_id": "v1", "name": "Alice", "category": "premade"}]
+
+
+def test_voices_endpoint_without_key_returns_empty(client, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main, "_voices_cache", None)
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "")
+
+    data = client.get("/api/voices").json()
+    assert data["voices"] == []
+
+
+def test_voices_endpoint_elevenlabs_failure_returns_empty(client, monkeypatch):
+    from app import main, tts
+
+    monkeypatch.setattr(main, "_voices_cache", None)
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "cle-test")
+
+    def boom(key):
+        raise tts.TTSError("panne")
+
+    monkeypatch.setattr(main, "list_voices", boom)
+    data = client.get("/api/voices").json()
+    assert data["voices"] == []
+
+
+def test_upload_stores_chosen_voice(client, tmp_path):
+    pdf = _make_pdf(tmp_path / "livre2.pdf")
+    with pdf.open("rb") as f:
+        resp = client.post(
+            "/api/books",
+            files={"file": ("livre2.pdf", f, "application/pdf")},
+            data={"language": "en", "voice_id": "voix-choisie"},
+        )
+    assert resp.status_code == 201
+    book = client.get("/api/books").json()[0]
+    assert book["voice_id"] == "voix-choisie"

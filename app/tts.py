@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 API_BASE = "https://api.elevenlabs.io/v1/text-to-speech"
+VOICES_URL = "https://api.elevenlabs.io/v1/voices"
 DEFAULT_TIMEOUT = 120.0
 
 
@@ -69,6 +70,28 @@ def synthesize_chunk(
                 for data in response.iter_bytes():
                     f.write(data)
     return out_path
+
+
+def list_voices(
+    api_key: str,
+    timeout: float = 30.0,
+    transport: httpx.BaseTransport | None = None,
+) -> list[dict]:
+    """Liste les voix du compte ElevenLabs (prédéfinies + clonées), format simplifié."""
+    if not api_key:
+        raise AuthError("ELEVENLABS_API_KEY n'est pas configurée.")
+    with httpx.Client(timeout=timeout, transport=transport) as client:
+        response = client.get(VOICES_URL, headers={"xi-api-key": api_key})
+    if response.status_code != 200:
+        _raise_for_status(response.status_code, response.text[:500])
+    return [
+        {
+            "voice_id": v["voice_id"],
+            "name": v["name"],
+            "category": v.get("category", ""),
+        }
+        for v in response.json().get("voices", [])
+    ]
 
 
 def _raise_for_status(status: int, body: str) -> None:

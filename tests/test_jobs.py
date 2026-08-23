@@ -1,5 +1,6 @@
 """Tests du pipeline de jobs : assemblage ffmpeg et reprise sans re-facturation."""
 
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -71,3 +72,68 @@ def test_run_conversion_skips_existing_chunks(data_dir, monkeypatch):
 
     assert len(calls) == 1, f"chunk existant re-facturé : {calls}"
     assert jobs.get_job(job_id)["status"] == "done"
+
+
+def test_init_db_migrates_old_schema(tmp_path, monkeypatch):
+    """Une base créée avant l'ajout de la colonne voice_id est migrée sans perte."""
+    settings.data_dir = tmp_path / "data"
+    settings.ensure_dirs()
+    with sqlite3.connect(settings.db_path) as conn:
+        conn.execute(
+            "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT NOT NULL, language TEXT NOT NULL,"
+            " status TEXT NOT NULL, char_count INTEGER NOT NULL DEFAULT 0,"
+            " total_chunks INTEGER NOT NULL DEFAULT 0, done_chunks INTEGER NOT NULL DEFAULT 0,"
+            " error TEXT, created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO jobs (id, title, language, status, created_at) VALUES ('abc', 't', 'fr', 'extracted', '2024-01-01')"
+        )
+
+    jobs.init_db()
+
+    job = jobs.get_job("abc")
+    assert job is not None
+    assert job["voice_id"] == ""
+
+
+def test_create_job_stores_voice_id(data_dir):
+    job_id = jobs.create_job(title="t", language="fr", voice_id="voix42")
+    assert jobs.get_job(job_id)["voice_id"] == "voix42"
+
+
+def test_run_conversion_uses_job_voice(data_dir, monkeypatch):
+    job_id = jobs.create_job(title="t", language="fr", voice_id="voix-du-job")
+    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=11)
+
+    captured = {}
+
+    def fake_tts(text, out_path, **kw):
+        captured.update(kw)
+        out_path.write_bytes(b"X")
+
+    monkeypatch.setattr(jobs, "synthesize_with_retry", fake_tts)
+    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
+
+    jobs.run_conversion(job_id)
+
+    assert captured["voice_id"] == "voix-du-job"
+
+
+def test_run_conversion_falls_back_to_default_voice(data_dir, monkeypatch):
+    job_id = jobs.create_job(title="t", language="fr")  # pas de voix choisie
+    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=11)
+
+    captured = {}
+
+    def fake_tts(text, out_path, **kw):
+        captured.update(kw)
+        out_path.write_bytes(b"X")
+
+    monkeypatch.setattr(jobs, "synthesize_with_retry", fake_tts)
+    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
+
+    jobs.run_conversion(job_id)
+
+    assert captured["voice_id"] == settings.elevenlabs_voice_id

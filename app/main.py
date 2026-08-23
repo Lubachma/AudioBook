@@ -1,5 +1,6 @@
 """API FastAPI : upload de PDF, suivi des conversions, streaming audio, UI statique."""
 
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,9 +10,14 @@ from fastapi.staticfiles import StaticFiles
 
 from . import jobs
 from .config import settings
+from .tts import TTSError, list_voices
 
 STATIC_DIR = Path(__file__).parent / "static"
 CHUNK_SIZE = 1 << 20  # 1 Mo
+VOICES_CACHE_TTL = 600  # secondes
+
+# Cache en mémoire de la liste des voix (évite un appel ElevenLabs par chargement de page)
+_voices_cache: tuple[float, list[dict]] | None = None
 
 
 @asynccontextmanager
@@ -35,12 +41,33 @@ def get_config() -> dict:
     }
 
 
+@app.get("/api/voices")
+def get_voices() -> dict:
+    """Voix du compte ElevenLabs, avec cache. Liste vide si clé absente ou API en échec."""
+    global _voices_cache
+    now = time.time()
+    if _voices_cache and now - _voices_cache[0] < VOICES_CACHE_TTL:
+        return {"voices": _voices_cache[1]}
+    if not settings.elevenlabs_api_key:
+        return {"voices": []}
+    try:
+        voices = list_voices(settings.elevenlabs_api_key)
+    except TTSError:
+        return {"voices": []}
+    _voices_cache = (now, voices)
+    return {"voices": voices}
+
+
 @app.post("/api/books", status_code=201)
-async def create_book(file: UploadFile = File(...), language: str = Form("fr")) -> dict:
+async def create_book(
+    file: UploadFile = File(...),
+    language: str = Form("fr"),
+    voice_id: str = Form(""),
+) -> dict:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Seuls les fichiers PDF sont acceptés.")
 
-    job_id = jobs.create_job(title=Path(file.filename).stem, language=language)
+    job_id = jobs.create_job(title=Path(file.filename).stem, language=language, voice_id=voice_id)
     pdf_path = jobs.pdf_path(job_id)
 
     max_bytes = settings.max_upload_mb * 1024 * 1024

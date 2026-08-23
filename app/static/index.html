@@ -41,6 +41,7 @@
   <div class="card">
     <form id="upload-form">
       <input type="file" id="file" accept="application/pdf" required>
+      <select id="voice" title="Voix de lecture"></select>
       <select id="language">
         <option value="fr">Français</option>
         <option value="en">English</option>
@@ -55,6 +56,7 @@
 <script>
 const STATUS_LABELS = { extracting: "Extraction…", extracted: "Prêt", converting: "Conversion…", done: "Terminé", error: "Erreur" };
 const cards = new Map(); // id -> élément DOM, pour ne pas recréer les lecteurs en cours d'écoute
+const voiceNames = new Map(); // voice_id -> nom affichable
 let monthlyQuota = 100000;
 
 async function loadConfig() {
@@ -63,6 +65,24 @@ async function loadConfig() {
   document.getElementById("voice-info").textContent = "Voix : " + cfg.voice_id + " · " + cfg.model_id;
   document.getElementById("language").value = cfg.default_language;
   if (!cfg.api_key_configured) document.getElementById("config-banner").style.display = "block";
+
+  const select = document.getElementById("voice");
+  const { voices } = await (await fetch("/api/voices")).json();
+  for (const v of voices) voiceNames.set(v.voice_id, v.name);
+  if (voices.length) {
+    select.innerHTML = "";
+    for (const v of voices) {
+      const opt = document.createElement("option");
+      opt.value = v.voice_id;
+      opt.textContent = v.name + (v.category === "cloned" ? " (clonée)" : "");
+      select.appendChild(opt);
+    }
+  } else {
+    // API injoignable ou clé absente : on propose au moins la voix du .env
+    voiceNames.set(cfg.voice_id, "Voix par défaut");
+    select.innerHTML = `<option value="${cfg.voice_id}">Voix par défaut</option>`;
+  }
+  select.value = cfg.voice_id;
 }
 
 document.getElementById("upload-form").addEventListener("submit", async (e) => {
@@ -72,6 +92,7 @@ document.getElementById("upload-form").addEventListener("submit", async (e) => {
   const data = new FormData();
   data.append("file", fileInput.files[0]);
   data.append("language", document.getElementById("language").value);
+  data.append("voice_id", document.getElementById("voice").value);
   const resp = await fetch("/api/books", { method: "POST", body: data });
   if (!resp.ok) { alert((await resp.json()).detail || "Échec de l'upload"); return; }
   fileInput.value = "";
@@ -89,7 +110,7 @@ function buildCard(book) {
   card.dataset.id = book.id;
   card.innerHTML = `
     <div><strong></strong></div>
-    <div class="row"><span class="badge"></span><span class="muted chars"></span></div>
+    <div class="row"><span class="badge"></span><span class="muted voice"></span><span class="muted chars"></span></div>
     <div class="body"></div>`;
   card.querySelector("strong").textContent = book.title;
   return card;
@@ -103,6 +124,7 @@ function updateCard(book) {
   badge.className = "badge " + book.status;
   badge.textContent = STATUS_LABELS[book.status] || book.status;
 
+  card.querySelector(".voice").textContent = book.voice_id ? "🎙 " + (voiceNames.get(book.voice_id) || book.voice_id) : "";
   card.querySelector(".chars").textContent = book.char_count ? formatChars(book.char_count) : "";
 
   const body = card.querySelector(".body");
