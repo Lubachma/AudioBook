@@ -33,7 +33,7 @@ git clone <repo> && cd AudioBook
 Lancement manuel :
 
 ```bash
-.venv/bin/uvicorn app.main:app --port 8000   # http://localhost:8000
+.venv/bin/uvicorn app.main:app --port 8765   # http://localhost:8765
 ```
 
 ### Service au démarrage (launchd)
@@ -52,7 +52,7 @@ Utilisateurs et groupes) sur un Mac qui sert de serveur.
 ```bash
 brew install --cask tailscale-app
 open -a Tailscale          # se connecter au compte Tailscale (une fois)
-/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 8000
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 8765
 ```
 
 L'app est alors sur `https://<nom-du-mac>.<tailnet>.ts.net` pour tous les

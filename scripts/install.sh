@@ -51,9 +51,9 @@ cat <<'EOF'
 
 Installation terminée. Étapes suivantes :
   1. Voix françaises designées :  .venv/bin/python scripts/design_voices.py
-  2. Lancer le serveur (test)  :  .venv/bin/uvicorn app.main:app --port 8000
+  2. Lancer le serveur (test)  :  .venv/bin/uvicorn app.main:app --port 8765
   3. Service au démarrage      :  ./scripts/install_service.sh
   4. Accès distant Tailscale   :  brew install --cask tailscale-app
      puis ouvrir Tailscale, se connecter, et :
-     /Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 8000
+     /Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 8765
 EOF
