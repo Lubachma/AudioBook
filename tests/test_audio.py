@@ -54,7 +54,8 @@ def fake_ffmpeg(monkeypatch):
     return commands
 
 
-def test_merge_book_wav_encodes_and_chapters(tmp_path, fake_ffmpeg, data_dir):
+def test_merge_book_wav_encodes_chapters_pause_loudnorm(tmp_path, fake_ffmpeg, data_dir, monkeypatch):
+    monkeypatch.setattr(settings, "chapter_pause_ms", 700)
     chunk_dir = tmp_path / "chunks"
     chunk_dir.mkdir()
     _write_silence(chunk_dir / "chunk_0001.wav", 0.5)
@@ -81,17 +82,56 @@ def test_merge_book_wav_encodes_and_chapters(tmp_path, fake_ffmpeg, data_dir):
     mp3_cmd, m4b_cmd = fake_ffmpeg
     assert "libmp3lame" in mp3_cmd
     assert settings.mp3_bitrate in mp3_cmd
+    assert "24000" in mp3_cmd  # -ar aligné sur les chunks
+    assert any("loudnorm" in arg for arg in mp3_cmd)  # normalisation du volume
     assert "aac" in m4b_cmd and "ipod" in m4b_cmd
+    assert any("loudnorm" in arg for arg in m4b_cmd)
 
-    # Chemins absolus dans la liste concat (bug historique du Pi)
-    for line in (chunk_dir / "concat.txt").read_text().splitlines():
+    # Chemins absolus dans la liste concat (bug historique du Pi),
+    # avec la pause insérée entre les deux chapitres.
+    concat_lines = (chunk_dir / "concat.txt").read_text().splitlines()
+    for line in concat_lines:
         path = line.removeprefix("file '").removesuffix("'")
         assert path.startswith("/"), f"chemin relatif dans la liste ffmpeg : {path}"
+    assert sum("silence.wav" in line for line in concat_lines) == 1
+    assert "silence.wav" in concat_lines[2]  # entre chunk_0002 et chunk_0003
 
-    # Chapitres : 0-1s puis 1-2s
+    # Chapitres : 0-1s, pause 0,7s, puis 1,7-2,7s
     meta = (chunk_dir / "chapters.ffmeta").read_text()
     assert "title=Un" in meta and "title=Deux" in meta
-    assert "START=0" in meta and "START=1000" in meta and "END=2000" in meta
+    assert "START=0" in meta and "END=1000" in meta
+    assert "START=1700" in meta and "END=2700" in meta
+
+
+def test_merge_book_single_chapter_has_no_pause(tmp_path, fake_ffmpeg, data_dir):
+    chunk_dir = tmp_path / "chunks"
+    chunk_dir.mkdir()
+    _write_silence(chunk_dir / "chunk_0001.wav", 0.5)
+    _write_silence(chunk_dir / "chunk_0002.wav", 0.5)
+
+    merge_book(
+        chunk_dir, "wav", tmp_path / "l.mp3", tmp_path / "l.m4b",
+        chapter_titles=["Livre"], chunk_chapters=[0, 0], title="Livre",
+    )
+
+    assert "silence.wav" not in (chunk_dir / "concat.txt").read_text()
+
+
+def test_merge_book_embeds_cover(tmp_path, fake_ffmpeg, data_dir):
+    chunk_dir = tmp_path / "chunks"
+    chunk_dir.mkdir()
+    _write_silence(chunk_dir / "chunk_0001.wav", 0.5)
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"\xff\xd8\xff fake jpeg")
+
+    merge_book(
+        chunk_dir, "wav", tmp_path / "l.mp3", tmp_path / "l.m4b",
+        chapter_titles=["Livre"], chunk_chapters=[0], title="Livre", cover=cover,
+    )
+
+    mp3_cmd, m4b_cmd = fake_ffmpeg
+    assert str(cover) in mp3_cmd and "1:v" in mp3_cmd
+    assert str(cover) in m4b_cmd and "attached_pic" in " ".join(m4b_cmd)
 
 
 def test_merge_book_mp3_copies_without_reencoding(tmp_path, fake_ffmpeg, monkeypatch, data_dir):
@@ -136,3 +176,28 @@ def test_merge_book_empty_dir_raises(tmp_path, data_dir):
             chunk_dir, "wav", tmp_path / "l.mp3", tmp_path / "l.m4b",
             chapter_titles=[], chunk_chapters=[], title="L",
         )
+
+
+def test_probe_chapters_parses_ffprobe_json(monkeypatch):
+    import subprocess as sp
+
+    from app.audio import probe_chapters
+
+    payload = {
+        "chapters": [
+            {"start_time": "0.000", "end_time": "11.400", "tags": {"title": "Chapitre 1"}},
+            {"start_time": "11.400", "end_time": "22.600", "tags": {"title": "Chapitre 2"}},
+        ]
+    }
+
+    class R:
+        returncode = 0
+        stdout = __import__("json").dumps(payload)
+        stderr = ""
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: R())
+    chapters = probe_chapters("/tmp/x.m4b")
+    assert chapters == [
+        {"title": "Chapitre 1", "start": 0.0, "end": 11.4},
+        {"title": "Chapitre 2", "start": 11.4, "end": 22.6},
+    ]

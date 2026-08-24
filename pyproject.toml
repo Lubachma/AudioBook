@@ -11,6 +11,8 @@ dependencies = [
     "python-multipart",
     "python-dotenv",
     "numpy",
+    "pillow",
+    "pypdfium2",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +22,7 @@ dependencies = [
 # mlx-audio exige mlx>=0.31 — incompatibles dans un même environnement.
 local = [
     "mlx-audio==0.5.0",
+    "mlx-whisper",  # contrôle qualité : transcription des chunks vs texte source
     "huggingface_hub>=1.0",
 ]
 dev = [

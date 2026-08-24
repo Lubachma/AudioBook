@@ -64,13 +64,24 @@ Repli sans HTTPS : servir uvicorn avec `--host $(tailscale ip -4)`.
 ## Utilisation
 
 1. Ouvrir l'app, choisir le fichier (PDF ou EPUB), le moteur et la voix, puis **Ajouter**.
-2. L'extraction affiche le nombre de caractères (et détecte les chapitres :
-   exacts pour un EPUB, par motifs « Chapitre X / Prologue / … » pour un PDF).
+2. L'extraction affiche le nombre de caractères, récupère la **couverture**
+   (jaquette EPUB ou 1re page du PDF) et détecte les chapitres (exacts pour un
+   EPUB, par motifs « Chapitre X / Prologue / … » pour un PDF).
 3. **Convertir en audio** : la synthèse tourne en tâche de fond (progression en
    temps réel). Un roman entier se génère typiquement en une nuit ; en cas
    d'interruption, la reprise ne re-synthétise que les segments manquants.
-4. Écoute dans le navigateur (position mémorisée, vitesse réglable), ou
-   téléchargement **MP3** / **M4B chapitré** (à ouvrir dans l'app Livres iOS).
+   Chaque segment local passe un **contrôle qualité** (transcription whisper
+   comparée au texte : un segment suspect est re-synthétisé automatiquement),
+   puis l'assemblage normalise le volume (**loudnorm**) et insère une courte
+   pause entre les chapitres.
+4. Écoute dans le navigateur : **position synchronisée entre appareils**,
+   sauts de **±30 s**, **liste des chapitres cliquable**, vitesse réglable, et
+   commandes sur l'**écran verrouillé** (Media Session, avec la couverture).
+   Ou téléchargement **MP3** / **M4B chapitré avec pochette** (app Livres iOS).
+
+L'app est une **PWA** : sur Android (Chrome ⋮ → « Installer l'application »)
+ou iOS (Partager → « Sur l'écran d'accueil »), elle s'installe comme une
+application avec sa propre icône.
 
 ## Migration depuis le Raspberry Pi (optionnel)
 

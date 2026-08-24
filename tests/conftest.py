@@ -80,7 +80,12 @@ def fake_local_engine(monkeypatch):
     return register_engine(monkeypatch, FakeLocalEngine())
 
 
-def make_epub(path: Path, chapters: list[tuple[str, str]], with_ncx: bool = True) -> Path:
+def make_epub(
+    path: Path,
+    chapters: list[tuple[str, str]],
+    with_ncx: bool = True,
+    cover_jpeg: bytes | None = None,
+) -> Path:
     """EPUB 2 minimal : mimetype, container, OPF (spine) et un XHTML par chapitre."""
     manifest_items = []
     spine_items = []
@@ -105,10 +110,15 @@ def make_epub(path: Path, chapters: list[tuple[str, str]], with_ncx: bool = True
     ncx_manifest = (
         '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>' if with_ncx else ""
     )
+    cover_manifest = ""
+    cover_meta = ""
+    if cover_jpeg is not None:
+        cover_manifest = '<item id="cover-img" href="cover.jpg" media-type="image/jpeg"/>'
+        cover_meta = '<meta name="cover" content="cover-img"/>'
     opf = f"""<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid">
-  <metadata/>
-  <manifest>{ncx_manifest}{''.join(manifest_items)}</manifest>
+  <metadata>{cover_meta}</metadata>
+  <manifest>{ncx_manifest}{cover_manifest}{''.join(manifest_items)}</manifest>
   <spine toc="ncx">{''.join(spine_items)}</spine>
 </package>"""
     ncx = f"""<?xml version="1.0"?>
@@ -126,6 +136,8 @@ def make_epub(path: Path, chapters: list[tuple[str, str]], with_ncx: bool = True
         z.writestr("OEBPS/content.opf", opf)
         if with_ncx:
             z.writestr("OEBPS/toc.ncx", ncx)
+        if cover_jpeg is not None:
+            z.writestr("OEBPS/cover.jpg", cover_jpeg)
         for name, content in docs:
             z.writestr(name, content)
     return path

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import engines, jobs, previews
+from . import audio, covers, engines, jobs, previews
 from .config import settings
 from .engines import TTSError
 from .settings_store import default_engine_name, default_voice_for, set_setting
@@ -143,6 +143,7 @@ def list_books() -> list[dict]:
     books = jobs.list_jobs()
     for book in books:
         book["has_m4b"] = book["status"] == "done" and jobs.m4b_path(book["id"]).exists()
+        book["has_cover"] = covers.cover_path(book["id"]).exists()
     return books
 
 
@@ -198,6 +199,44 @@ def get_audio_m4b(job_id: str) -> FileResponse:
     return FileResponse(m4b, media_type="audio/mp4", filename=f"{job['title']}.m4b")
 
 
+# Cache des chapitres lus depuis le M4B (les livres terminés sont immuables).
+_chapters_cache: dict[str, list[dict]] = {}
+
+
+@app.get("/api/books/{job_id}/chapters")
+def get_chapters(job_id: str) -> dict:
+    """Chapitres {title, start, end} du livre, lus depuis les métadonnées du M4B."""
+    m4b = jobs.m4b_path(job_id)
+    if jobs.get_job(job_id) is None or not m4b.exists():
+        return {"chapters": []}
+    if job_id not in _chapters_cache:
+        try:
+            _chapters_cache[job_id] = audio.probe_chapters(m4b)
+        except audio.AudioError:
+            return {"chapters": []}
+    return {"chapters": _chapters_cache[job_id]}
+
+
+@app.get("/api/books/{job_id}/cover")
+def get_cover(job_id: str) -> FileResponse:
+    path = covers.cover_path(job_id)
+    if jobs.get_job(job_id) is None or not path.exists():
+        raise HTTPException(status_code=404, detail="Pas de couverture.")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+class PositionRequest(BaseModel):
+    seconds: float
+
+
+@app.put("/api/books/{job_id}/position", status_code=204)
+def set_position(job_id: str, body: PositionRequest) -> None:
+    """Position de lecture partagée entre appareils (source de vérité serveur)."""
+    if jobs.get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="Livre introuvable.")
+    jobs.update_job(job_id, position_seconds=max(0.0, float(body.seconds)))
+
+
 @app.delete("/api/books/{job_id}", status_code=204)
 def delete_book(job_id: str) -> None:
     job = jobs.get_job(job_id)
@@ -209,6 +248,7 @@ def delete_book(job_id: str) -> None:
             detail="Conversion en cours : attendez la fin ou le prochain statut d'erreur.",
         )
     jobs.delete_job(job_id)
+    _chapters_cache.pop(job_id, None)
 
 
 # ---------------------------------------------------------- banc d'essai voix

@@ -42,6 +42,15 @@ class Settings:
         # Sortie audio
         self.mp3_bitrate = os.environ.get("MP3_BITRATE", "96k")
         self.m4b_bitrate = os.environ.get("M4B_BITRATE", "64k")
+        # Normalisation du volume à l'assemblage (filtre ffmpeg loudnorm) ; vide = désactivée.
+        self.loudnorm = os.environ.get("LOUDNORM", "I=-18:TP=-2:LRA=11")
+        # Pause insérée entre deux chapitres (moteurs locaux), en millisecondes.
+        self.chapter_pause_ms = _int("CHAPTER_PAUSE_MS", 700)
+
+        # Contrôle qualité des chunks locaux : transcription whisper vs texte source.
+        self.qc_enabled = os.environ.get("QC_ENABLED", "1").lower() not in ("0", "false", "")
+        self.qc_min_ratio = _float("QC_MIN_RATIO", 0.70)
+        self.qc_whisper_model = os.environ.get("QC_WHISPER_MODEL", "mlx-community/whisper-small-mlx")
 
         # Moteur local qwen3 (mlx-audio)
         self.qwen3_base_model = os.environ.get(
@@ -97,6 +106,10 @@ class Settings:
         return self.data_dir / "previews"
 
     @property
+    def covers_dir(self) -> Path:
+        return self.data_dir / "covers"
+
+    @property
     def logs_dir(self) -> Path:
         return self.data_dir / "logs"
 
@@ -112,6 +125,7 @@ class Settings:
             self.text_dir,
             self.voices_dir,
             self.previews_dir,
+            self.covers_dir,
             self.logs_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)

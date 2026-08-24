@@ -219,6 +219,7 @@ def test_init_db_migrates_old_schema(tmp_path):
     assert job["engine"] == "elevenlabs"
     assert job["voice_label"] == ""
     assert job["source_type"] == "pdf"
+    assert job["position_seconds"] == 0
 
 
 def test_recover_interrupted_reenqueues_extractions(data_dir, monkeypatch):
@@ -233,6 +234,91 @@ def test_recover_interrupted_reenqueues_extractions(data_dir, monkeypatch):
 
     assert jobs.get_job(job_id)["status"] == "extracting"  # pas d'erreur "ré-uploadez"
     assert (job_id, "extract") in enqueued
+
+
+# --------------------------------------------------------- contrôle qualité
+
+def _qc_book(fake_local_engine):
+    job_id = jobs.create_job(title="t", language="fr", engine="fake-local")
+    jobs.text_path(job_id).write_text("Une phrase à contrôler.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=23)
+    return job_id
+
+
+def test_qc_retries_bad_chunk_and_keeps_best(data_dir, fake_local_engine, monkeypatch):
+    """Un chunk suspect (transcription trop éloignée) déclenche une seconde prise."""
+    monkeypatch.setattr(settings, "qc_enabled", True)
+    monkeypatch.setattr(settings, "qc_min_ratio", 0.7)
+    monkeypatch.setattr(jobs.qc, "available", lambda: True)
+    ratios = iter([0.3, 0.95])  # 1re prise mauvaise, 2e bonne
+    checked = []
+
+    def fake_ratio(path, text, *, language):
+        checked.append(str(path))
+        return next(ratios)
+
+    monkeypatch.setattr(jobs.qc, "match_ratio", fake_ratio)
+
+    job_id = _qc_book(fake_local_engine)
+    jobs.run_conversion(job_id)
+
+    assert len(fake_local_engine.calls) == 2  # synthèse + seconde prise
+    assert len(checked) == 2
+    assert jobs.get_job(job_id)["status"] == "done"
+
+
+def test_qc_keeps_first_take_when_second_is_worse(data_dir, fake_local_engine, monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "qc_enabled", True)
+    monkeypatch.setattr(settings, "qc_min_ratio", 0.9)
+    monkeypatch.setattr(jobs.qc, "available", lambda: True)
+    ratios = iter([0.6, 0.4])
+    monkeypatch.setattr(jobs.qc, "match_ratio", lambda p, t, *, language: next(ratios))
+
+    take = []
+
+    def synth(text, out_path, *, voice_id, language):
+        take.append(1)
+        from pathlib import Path
+
+        Path(out_path).write_bytes(f"PRISE{len(take)}".encode())
+
+    monkeypatch.setattr(fake_local_engine, "_synthesize", synth)
+
+    chunk = tmp_path / "chunk_0001.wav"
+    jobs._synthesize_checked(
+        fake_local_engine, "texte", chunk, voice_id="fv1", language="fr", use_qc=True
+    )
+
+    assert chunk.read_bytes() == b"PRISE1"  # la meilleure des deux prises est conservée
+    assert not chunk.with_name(chunk.name + ".take1").exists()
+
+
+def test_qc_disabled_never_transcribes(data_dir, fake_local_engine, monkeypatch):
+    monkeypatch.setattr(settings, "qc_enabled", False)
+    called = []
+    monkeypatch.setattr(jobs.qc, "match_ratio", lambda *a, **k: called.append(1) or 1.0)
+
+    job_id = _qc_book(fake_local_engine)
+    jobs.run_conversion(job_id)
+
+    assert called == []
+    assert len(fake_local_engine.calls) == 1
+
+
+def test_qc_failure_never_blocks_book(data_dir, fake_local_engine, monkeypatch):
+    """whisper qui explose ne doit pas faire échouer la conversion."""
+    monkeypatch.setattr(settings, "qc_enabled", True)
+    monkeypatch.setattr(jobs.qc, "available", lambda: True)
+
+    def boom(*a, **k):
+        raise RuntimeError("whisper cassé")
+
+    monkeypatch.setattr(jobs.qc, "match_ratio", boom)
+
+    job_id = _qc_book(fake_local_engine)
+    jobs.run_conversion(job_id)
+
+    assert jobs.get_job(job_id)["status"] == "done"
 
 
 def test_delete_job_removes_all_artifacts(data_dir, fake_engine):

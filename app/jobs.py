@@ -14,6 +14,7 @@ sont déchargés pour rendre la RAM.
 
 import hashlib
 import json
+import os
 import queue
 import shutil
 import sqlite3
@@ -23,7 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import audio, engines, epub_extract, pdf_extract, previews
+from . import audio, covers, engines, epub_extract, pdf_extract, previews, qc
 from .chapters import Chapter, load_chapters, save_chapters
 from .chunker import chunk_by_chapters
 from .config import settings
@@ -43,7 +44,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     voice_id TEXT NOT NULL DEFAULT '',
     engine TEXT NOT NULL DEFAULT 'elevenlabs',
     voice_label TEXT NOT NULL DEFAULT '',
-    source_type TEXT NOT NULL DEFAULT 'pdf'
+    source_type TEXT NOT NULL DEFAULT 'pdf',
+    position_seconds REAL NOT NULL DEFAULT 0
 )
 """
 
@@ -55,6 +57,7 @@ MIGRATIONS = (
     "engine TEXT NOT NULL DEFAULT 'elevenlabs'",
     "voice_label TEXT NOT NULL DEFAULT ''",
     "source_type TEXT NOT NULL DEFAULT 'pdf'",
+    "position_seconds REAL NOT NULL DEFAULT 0",
 )
 
 # File FIFO consommée par le thread worker ; items :
@@ -144,6 +147,7 @@ def delete_job(job_id: str) -> bool:
             chapters_path(job_id),
             audio_path(job_id),
             m4b_path(job_id),
+            covers.cover_path(job_id),
         ):
             path.unlink(missing_ok=True)
         shutil.rmtree(chunk_dir(job_id), ignore_errors=True)
@@ -233,6 +237,7 @@ def _worker_loop() -> None:
         except queue.Empty:
             try:
                 engines.unload_all()
+                qc.unload()
             except Exception:  # noqa: BLE001 - le worker doit survivre à tout
                 traceback.print_exc()
             continue
@@ -268,6 +273,7 @@ def run_extraction(job_id: str) -> None:
         text, chapters = pdf_extract.extract_book(source)
     text_path(job_id).write_text(text, encoding="utf-8")
     save_chapters(chapters_path(job_id), chapters)
+    covers.extract_cover(job_id, source, source_type)  # best-effort, jamais bloquant
     update_job(job_id, status="extracted", char_count=len(text), error=None)
 
 
@@ -351,6 +357,7 @@ def run_conversion(job_id: str) -> None:
 
     voice_id = job["voice_id"] or default_voice_for(engine_name) or engine.default_voice()
     language = job["language"] or settings.default_language
+    use_qc = engine.is_local and settings.qc_enabled and qc.available()
     update_job(job_id, status="converting", total_chunks=len(chunks), done_chunks=0, error=None)
 
     engines.activate(engine_name)
@@ -359,9 +366,11 @@ def run_conversion(job_id: str) -> None:
         # Un chunk déjà présent (tentative précédente interrompue) n'est pas
         # re-synthétisé : la reprise ne re-facture/re-calcule pas le moteur TTS.
         if not (chunk_file.exists() and chunk_file.stat().st_size > 0):
-            engine.synthesize_with_retry(chunk, chunk_file, voice_id=voice_id, language=language)
+            _synthesize_checked(engine, chunk, chunk_file, voice_id=voice_id,
+                                language=language, use_qc=use_qc)
         update_job(job_id, done_chunks=i)
 
+    cover = covers.cover_path(job_id)
     audio.merge_book(
         out_dir,
         engine.chunk_ext,
@@ -371,6 +380,56 @@ def run_conversion(job_id: str) -> None:
         chunk_chapters=[chapter_idx for _, chapter_idx in chunks],
         title=job["title"],
         artist=job.get("voice_label") or voice_id,
+        cover=cover if cover.exists() else None,
     )
     shutil.rmtree(out_dir)
     update_job(job_id, status="done")
+
+
+def _synthesize_checked(
+    engine: engines.Engine,
+    text: str,
+    chunk_file: Path,
+    *,
+    voice_id: str,
+    language: str,
+    use_qc: bool,
+) -> None:
+    """Synthèse + contrôle qualité : transcription whisper comparée au texte source.
+
+    Un score trop bas déclenche une seconde prise (l'aléa d'échantillonnage suffit
+    en général) ; on garde la meilleure des deux. Jamais bloquant : en cas de doute
+    persistant, la meilleure prise est conservée et un avertissement est loggé.
+    """
+    engine.synthesize_with_retry(text, chunk_file, voice_id=voice_id, language=language)
+    if not use_qc:
+        return
+    try:
+        ratio = qc.match_ratio(chunk_file, text, language=language)
+    except Exception as exc:  # noqa: BLE001 - le QC ne doit jamais bloquer un livre
+        print(f"QC indisponible sur {chunk_file.name} : {exc}")
+        return
+    if ratio >= settings.qc_min_ratio:
+        return
+
+    print(f"QC : {chunk_file.name} suspect (score {ratio:.2f}) — seconde prise…")
+    first_take = chunk_file.with_name(chunk_file.name + ".take1")
+    os.replace(chunk_file, first_take)
+    try:
+        try:
+            engine.synthesize_with_retry(text, chunk_file, voice_id=voice_id, language=language)
+        except Exception:
+            os.replace(first_take, chunk_file)  # on garde au moins la première prise
+            raise
+        try:
+            second_ratio = qc.match_ratio(chunk_file, text, language=language)
+        except Exception:  # noqa: BLE001
+            second_ratio = ratio  # QC muet : la seconde prise reste
+        if second_ratio < ratio:
+            os.replace(first_take, chunk_file)
+            second_ratio = ratio
+        if second_ratio < settings.qc_min_ratio:
+            print(f"QC : {chunk_file.name} toujours sous le seuil ({second_ratio:.2f}), "
+                  "meilleure prise conservée.")
+    finally:
+        first_take.unlink(missing_ok=True)

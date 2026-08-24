@@ -291,6 +291,64 @@ def test_invalid_engine_rejected_on_voices(client):
     assert client.get("/api/voices?engine=Edge").status_code == 400
 
 
+# --------------------------------------- position, chapitres et couverture
+
+def test_position_roundtrip_across_devices(client, tmp_path):
+    pdf = _make_pdf(tmp_path / "livre6.pdf")
+    with pdf.open("rb") as f:
+        job_id = client.post(
+            "/api/books", files={"file": ("livre6.pdf", f, "application/pdf")}, data={"language": "fr"}
+        ).json()["id"]
+
+    assert client.put(f"/api/books/{job_id}/position", json={"seconds": 123.4}).status_code == 204
+    book = next(b for b in client.get("/api/books").json() if b["id"] == job_id)
+    assert book["position_seconds"] == pytest.approx(123.4)
+
+    # Valeur négative ramenée à zéro, livre inconnu -> 404
+    client.put(f"/api/books/{job_id}/position", json={"seconds": -5})
+    book = next(b for b in client.get("/api/books").json() if b["id"] == job_id)
+    assert book["position_seconds"] == 0
+    assert client.put("/api/books/inconnu/position", json={"seconds": 1}).status_code == 404
+
+
+def test_chapters_endpoint_empty_without_m4b(client):
+    job_id = jobs.create_job(title="livre", language="fr")
+    assert client.get(f"/api/books/{job_id}/chapters").json() == {"chapters": []}
+    assert client.get("/api/books/inconnu/chapters").json() == {"chapters": []}
+
+
+def test_chapters_endpoint_reads_m4b(client, tmp_path, monkeypatch):
+    pdf = _make_pdf(tmp_path / "livre7.pdf")
+    with pdf.open("rb") as f:
+        job_id = client.post(
+            "/api/books", files={"file": ("livre7.pdf", f, "application/pdf")}, data={"language": "fr"}
+        ).json()["id"]
+    client.post(f"/api/books/{job_id}/convert")
+
+    fake_chapters = [{"title": "Un", "start": 0.0, "end": 10.0}]
+    monkeypatch.setattr(main.audio, "probe_chapters", lambda path: fake_chapters)
+    monkeypatch.setattr(main, "_chapters_cache", {})
+
+    assert client.get(f"/api/books/{job_id}/chapters").json() == {"chapters": fake_chapters}
+
+
+def test_cover_endpoint(client, tmp_path):
+    pdf = _make_pdf(tmp_path / "livre8.pdf")
+    with pdf.open("rb") as f:
+        job_id = client.post(
+            "/api/books", files={"file": ("livre8.pdf", f, "application/pdf")}, data={"language": "fr"}
+        ).json()["id"]
+
+    # L'extraction (synchrone en test) a rendu la 1re page du PDF en couverture
+    book = next(b for b in client.get("/api/books").json() if b["id"] == job_id)
+    assert book["has_cover"] is True
+    resp = client.get(f"/api/books/{job_id}/cover")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+
+    assert client.get("/api/books/inconnu/cover").status_code == 404
+
+
 # --------------------------------------------------------- banc d'essai voix
 
 def test_previews_flow_and_default_voice(client, monkeypatch, fake_engine):
