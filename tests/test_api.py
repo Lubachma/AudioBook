@@ -328,6 +328,55 @@ def test_invalid_engine_rejected_on_voices(client):
     assert client.get("/api/voices?engine=Edge").status_code == 400
 
 
+# ------------------------------------------------ annulation et pré-écoute
+
+def test_cancel_queued_book_is_immediate(client, monkeypatch):
+    job_id = jobs.create_job(title="livre", language="fr", engine="fake")
+    jobs.text_path(job_id).write_text("Du texte.", encoding="utf-8")
+    jobs.update_job(job_id, status="queued")
+
+    resp = client.post(f"/api/books/{job_id}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "extracted"
+    assert jobs.get_job(job_id)["status"] == "extracted"
+
+    # L'item de file périmé arrive plus tard : il ne doit rien convertir
+    jobs.run_conversion(job_id)
+    assert jobs.get_job(job_id)["status"] == "extracted"
+
+
+def test_cancel_converting_book_flags_worker(client):
+    job_id = jobs.create_job(title="livre", language="fr", engine="fake")
+    jobs.update_job(job_id, status="converting")
+
+    resp = client.post(f"/api/books/{job_id}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelling"
+
+
+def test_cancel_rejected_when_nothing_running(client):
+    job_id = jobs.create_job(title="livre", language="fr")
+    jobs.update_job(job_id, status="done")
+    assert client.post(f"/api/books/{job_id}/cancel").status_code == 409
+    assert client.post("/api/books/inconnu/cancel").status_code == 404
+
+
+def test_live_chunk_streaming_during_conversion(client):
+    job_id = jobs.create_job(title="livre", language="fr", engine="fake")
+    jobs.update_job(job_id, status="converting")
+    directory = jobs.chunk_dir(job_id)
+    directory.mkdir(parents=True)
+    (directory / "chunk_0001.wav").write_bytes(b"RIFFsegment1")
+
+    ok = client.get(f"/api/books/{job_id}/chunks/1")
+    assert ok.status_code == 200
+    assert ok.headers["content-type"].startswith("audio/wav")
+    assert ok.content == b"RIFFsegment1"
+
+    assert client.get(f"/api/books/{job_id}/chunks/2").status_code == 404
+    assert client.get("/api/books/inconnu/chunks/1").status_code == 404
+
+
 # --------------------------------------- position, chapitres et couverture
 
 def test_position_roundtrip_across_devices(client, tmp_path):

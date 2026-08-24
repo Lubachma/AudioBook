@@ -280,6 +280,65 @@ def test_record_speed_ignores_insignificant_measures(data_dir):
     assert get_setting("speed_cpm:fake") == "2000"
 
 
+def test_enqueue_routes_extractions_to_fast_queue(data_dir):
+    """Les extractions (secondes) ne doivent pas attendre derrière une conversion (heures)."""
+    jobs.enqueue("a", "extract")
+    jobs.enqueue("b", "convert")
+    assert jobs._extract_queue.get_nowait()["job_id"] == "a"
+    assert jobs._queue.get_nowait()["job_id"] == "b"
+
+
+# --------------------------------------------------------------- annulation
+
+def test_cancel_before_start_keeps_job_convertible(data_dir, fake_engine):
+    job_id = _make_book()
+    jobs.request_cancel(job_id)
+
+    jobs.run_conversion(job_id)
+
+    assert fake_engine.calls == []  # rien synthétisé
+    assert jobs.get_job(job_id)["status"] == "extracted"
+
+
+def test_cancel_mid_conversion_keeps_chunks_for_resume(data_dir, fake_engine, monkeypatch):
+    """L'annulation s'applique entre deux segments ; les segments faits restent
+    sur disque et une relance reprend exactement là."""
+    monkeypatch.setattr(FakeEngine, "chunk_max_chars", 20)  # 2 chunks
+
+    original = fake_engine._synthesize.__func__
+
+    def synth_then_cancel(self, text, out_path, *, voice_id, language):
+        original(self, text, out_path, voice_id=voice_id, language=language)
+        jobs.request_cancel(job_id)  # demandé pendant le 1er segment
+
+    monkeypatch.setattr(FakeEngine, "_synthesize", synth_then_cancel)
+    job_id = _make_book()
+
+    jobs.run_conversion(job_id)
+
+    assert len(fake_engine.calls) == 1  # arrêt avant le segment 2
+    job = jobs.get_job(job_id)
+    assert job["status"] == "extracted"
+    chunk1 = jobs.chunk_dir(job_id) / "chunk_0001.mp3"
+    assert chunk1.exists()  # conservé pour la reprise
+
+    # Relance : le segment 1 est réutilisé, seul le 2 est synthétisé
+    monkeypatch.setattr(FakeEngine, "_synthesize", original)
+    jobs.run_conversion(job_id)
+    assert len(fake_engine.calls) == 2
+    assert jobs.get_job(job_id)["status"] == "done"
+
+
+def test_clear_cancel_lets_conversion_proceed(data_dir, fake_engine):
+    job_id = _make_book()
+    jobs.request_cancel(job_id)
+    jobs.clear_cancel(job_id)
+
+    jobs.run_conversion(job_id)
+
+    assert jobs.get_job(job_id)["status"] == "done"
+
+
 # --------------------------------------------------------- contrôle qualité
 
 def _qc_book(fake_local_engine):

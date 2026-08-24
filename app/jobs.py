@@ -64,14 +64,37 @@ MIGRATIONS = (
     "last_played_at TEXT NOT NULL DEFAULT ''",
 )
 
-# File FIFO consommée par le thread worker ; items :
-#   {"action": "extract"|"convert", "job_id": str}
-#   {"action": "preview", "engine": str, "voice_id": str, "language": str}
+# Deux files et deux workers :
+# - _queue : synthèse (convert/preview), strictement séquentielle — les modèles
+#   locaux ne supportent qu'un job GPU à la fois ;
+# - _extract_queue : extractions (CPU, quelques secondes) — traitées immédiatement,
+#   sans attendre des heures derrière une conversion en cours.
 _queue: queue.Queue[dict] = queue.Queue()
+_extract_queue: queue.Queue[dict] = queue.Queue()
 _worker_thread: threading.Thread | None = None
+_extract_thread: threading.Thread | None = None
 
 # Après ce délai sans travail, les modèles locaux sont déchargés (RAM rendue au Mac).
 IDLE_UNLOAD_SECONDS = 300
+
+# Annulations demandées depuis l'API, consommées par le worker entre deux chunks.
+_cancel_requested: set[str] = set()
+
+
+def request_cancel(job_id: str) -> None:
+    _cancel_requested.add(job_id)
+
+
+def clear_cancel(job_id: str) -> None:
+    """Une (re)conversion demandée annule toute annulation encore en attente."""
+    _cancel_requested.discard(job_id)
+
+
+def _consume_cancel(job_id: str) -> bool:
+    if job_id in _cancel_requested:
+        _cancel_requested.discard(job_id)
+        return True
+    return False
 
 
 # ---------------------------------------------------------------- base SQLite
@@ -213,17 +236,20 @@ def chunk_dir(job_id: str) -> Path:
 # ---------------------------------------------------------------- worker
 
 def start_worker() -> None:
-    global _worker_thread
+    global _worker_thread, _extract_thread
     if _worker_thread and _worker_thread.is_alive():
         return
     init_db()
     recover_interrupted()
     _worker_thread = threading.Thread(target=_worker_loop, daemon=True)
     _worker_thread.start()
+    _extract_thread = threading.Thread(target=_extract_loop, daemon=True)
+    _extract_thread.start()
 
 
 def enqueue(job_id: str, action: str) -> None:
-    _queue.put({"action": action, "job_id": job_id})
+    item = {"action": action, "job_id": job_id}
+    (_extract_queue if action == "extract" else _queue).put(item)
 
 
 def enqueue_preview(engine_name: str, voice_id: str, language: str) -> None:
@@ -254,9 +280,7 @@ def _worker_loop() -> None:
             continue
         try:
             action = item["action"]
-            if action == "extract":
-                run_extraction(item["job_id"])
-            elif action == "convert":
+            if action == "convert":
                 run_conversion(item["job_id"])
             elif action == "preview":
                 previews.run_preview(item)
@@ -267,6 +291,17 @@ def _worker_loop() -> None:
                 previews.mark_error(item, str(exc))
         finally:
             _queue.task_done()
+
+
+def _extract_loop() -> None:
+    while True:
+        item = _extract_queue.get()
+        try:
+            run_extraction(item["job_id"])
+        except Exception as exc:  # noqa: BLE001 - toute erreur doit remonter dans l'UI
+            _mark_error_safe(item["job_id"], str(exc))
+        finally:
+            _extract_queue.task_done()
 
 
 # ---------------------------------------------------------------- pipeline
@@ -333,6 +368,9 @@ def run_conversion(job_id: str) -> None:
     if job is None or job["status"] == "done":
         # Garde anti double-traitement : un livre terminé n'est jamais re-synthétisé.
         return
+    if _consume_cancel(job_id):
+        update_job(job_id, status="extracted", error=None)
+        return
 
     free_mb = shutil.disk_usage(settings.data_dir).free / (1024 * 1024)
     if free_mb < settings.min_free_disk_mb:
@@ -379,6 +417,11 @@ def run_conversion(job_id: str) -> None:
     synth_chars = 0
     synth_seconds = 0.0
     for i, (chunk, _chapter_idx) in enumerate(chunks, start=1):
+        if _consume_cancel(job_id):
+            # Annulation : les chunks déjà générés restent sur disque, un futur
+            # « Convertir » reprendra exactement là (même empreinte).
+            update_job(job_id, status="extracted", error=None)
+            return
         chunk_file = out_dir / f"chunk_{i:04d}.{engine.chunk_ext}"
         # Un chunk déjà présent (tentative précédente interrompue) n'est pas
         # re-synthétisé : la reprise ne re-facture/re-calcule pas le moteur TTS.

@@ -20,10 +20,11 @@ def data_dir(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _clean_previews_state(monkeypatch):
-    """L'état mémoire du banc d'essai ne doit pas fuiter d'un test à l'autre."""
+    """Les états mémoire (banc d'essai, annulations) ne fuient pas entre tests."""
     from app import previews
 
     monkeypatch.setattr(previews, "_state", {})
+    monkeypatch.setattr(jobs, "_cancel_requested", set())
 
 
 class FakeEngine(Engine):

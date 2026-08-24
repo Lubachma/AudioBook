@@ -182,9 +182,46 @@ def convert_book(job_id: str) -> dict:
     # Statut posé AVANT l'enqueue : un second clic est refusé (409) pendant
     # que le job attend dans la file — sinon il serait converti deux fois.
     # "queued" tant que le worker n'a pas commencé, "converting" ensuite.
+    jobs.clear_cancel(job_id)
     jobs.update_job(job_id, status="queued", error=None)
     jobs.enqueue(job_id, "convert")
     return {"id": job_id, "status": "queued"}
+
+
+@app.post("/api/books/{job_id}/cancel")
+def cancel_book(job_id: str) -> dict:
+    """Annule une conversion en attente ou en cours. Les segments déjà générés
+    sont conservés : un futur « Convertir » reprendra au même endroit."""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Livre introuvable.")
+    if job["status"] not in ("queued", "converting"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Rien à annuler depuis le statut '{job['status']}'.",
+        )
+    jobs.request_cancel(job_id)
+    if job["status"] == "queued":
+        # Pas encore commencé : effet immédiat.
+        jobs.update_job(job_id, status="extracted", error=None)
+        return {"id": job_id, "status": "extracted"}
+    # En cours : le worker s'arrête à la fin du segment en train d'être synthétisé.
+    return {"id": job_id, "status": "cancelling"}
+
+
+@app.get("/api/books/{job_id}/chunks/{index}")
+def get_chunk(job_id: str, index: int) -> FileResponse:
+    """Segment audio brut pendant la génération (pré-écoute en direct).
+
+    Les segments sont écrits atomiquement : un fichier présent est complet."""
+    if jobs.get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="Livre introuvable.")
+    directory = jobs.chunk_dir(job_id)
+    for ext, media in (("wav", "audio/wav"), ("mp3", "audio/mpeg")):
+        path = directory / f"chunk_{index:04d}.{ext}"
+        if path.exists() and path.stat().st_size > 0:
+            return FileResponse(path, media_type=media)
+    raise HTTPException(status_code=404, detail="Segment pas encore généré.")
 
 
 class ReconvertRequest(BaseModel):
@@ -217,6 +254,7 @@ def reconvert_book(job_id: str, body: ReconvertRequest) -> dict:
         raise HTTPException(status_code=409, detail=f"Moteur {engine_name} indisponible : {reason}")
 
     voice_id = body.voice_id  # vide = voix par défaut du moteur au moment de la synthèse
+    jobs.clear_cancel(job_id)
     jobs.update_job(
         job_id,
         engine=engine_name,

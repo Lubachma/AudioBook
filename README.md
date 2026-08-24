@@ -71,12 +71,17 @@ Repli sans HTTPS : servir uvicorn avec `--host $(tailscale ip -4)`.
    chapitres (exacts pour un EPUB, par motifs pour un PDF). L'estimation
    affiche la durée d'audio et le temps de génération attendus.
 3. **Convertir en audio** : file d'attente visible (« En attente »), progression
-   et **temps restant estimé**. Un roman entier se génère typiquement en une
-   nuit ; une interruption ou un redémarrage du Mac **reprend tout seul** sans
-   re-synthétiser les segments déjà faits. Chaque segment local passe un
-   **contrôle qualité** (transcription whisper comparée au texte : segment
-   suspect → seconde prise), puis l'assemblage normalise le volume
-   (**loudnorm**) et insère une courte pause entre les chapitres.
+   et **temps restant estimé**. Pendant la génération : **pré-écoute en direct**
+   des segments déjà synthétisés (pour juger la voix après 2 minutes plutôt
+   qu'après 10 heures) et bouton **✕ Annuler** (les segments faits sont
+   conservés, « Convertir » reprend au même endroit). Les extractions de
+   nouveaux livres tournent en parallèle, sans attendre la fin d'une conversion.
+   Un roman entier se génère typiquement en une nuit ; une interruption ou un
+   redémarrage du Mac **reprend tout seul** sans re-synthétiser les segments
+   déjà faits. Chaque segment local passe un **contrôle qualité** (transcription
+   whisper comparée au texte : segment suspect → seconde prise), puis
+   l'assemblage normalise le volume (**loudnorm**) et insère une courte pause
+   entre les chapitres.
 4. Écoute dans le navigateur : carte **« Continuer l'écoute »** en tête de page,
    **position synchronisée entre appareils**, barre de progression avec
    **graduations de chapitres**, sauts de **±30 s**, **minuterie de sommeil**

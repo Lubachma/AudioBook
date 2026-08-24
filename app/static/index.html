@@ -352,6 +352,81 @@ function formatChars(book) {
   return chars + " (gratuit, local)";
 }
 
+function latestBookById(id) { return latestBooks.find((b) => b.id === id); }
+
+function buildCancelBtn(book) {
+  return mkBtn("✕ Annuler", async () => {
+    const ok = confirm(
+      "Arrêter la génération de « " + book.title + " » ?\n" +
+      "Les segments déjà créés sont conservés : « Convertir » reprendra au même endroit."
+    );
+    if (!ok) return;
+    const resp = await fetch(`/api/books/${book.id}/cancel`, { method: "POST" });
+    if (!resp.ok) alert((await resp.json()).detail || "Échec de l'annulation");
+    refresh();
+  }, "btn-danger btn-small");
+}
+
+// Carte « conversion en cours » : construite une seule fois (la pré-écoute ne
+// doit pas être coupée par le polling), puis seulement mise à jour.
+function buildConvertingCard(body, book) {
+  const bar = document.createElement("progress");
+  bar.className = "conv-bar";
+  const label = document.createElement("div");
+  label.className = "muted conv-label";
+  const row = document.createElement("div");
+  row.className = "row";
+  row.append(buildCancelBtn(book));
+
+  const details = document.createElement("details");
+  details.className = "chapters";
+  const summary = document.createElement("summary");
+  summary.textContent = "▶ Pré-écouter pendant la génération (voix réelle du livre)";
+  const audio = document.createElement("audio");
+  audio.controls = true;
+  audio.preload = "none";
+  const status = document.createElement("div");
+  status.className = "muted";
+  details.append(summary, audio, status);
+
+  const state = { idx: 0, waiting: false };
+  const doneCount = () => (latestBookById(book.id) || book).done_chunks || 0;
+  const startAt = (i) => {
+    state.idx = i;
+    state.waiting = false;
+    audio.src = `/api/books/${book.id}/chunks/${i}`;
+    audio.play().catch(() => {});
+    status.textContent = `segment ${i} — ${doneCount()} déjà générés`;
+    if (i + 1 <= doneCount()) new Audio(`/api/books/${book.id}/chunks/${i + 1}`); // préchargement
+  };
+  details.addEventListener("toggle", () => {
+    if (details.open && state.idx === 0) {
+      if (doneCount() >= 1) startAt(1);
+      else { state.waiting = true; status.textContent = "aucun segment prêt pour l'instant…"; }
+    }
+  });
+  audio.addEventListener("ended", () => {
+    if (state.idx + 1 <= doneCount()) startAt(state.idx + 1);
+    else { state.waiting = true; status.textContent = "segment suivant en cours de génération…"; }
+  });
+  // Appelé à chaque polling : reprend automatiquement quand le segment attendu arrive.
+  body._liveTick = () => {
+    if (state.waiting && state.idx + 1 <= doneCount() && details.open) startAt(state.idx + 1);
+    else if (state.idx > 0 && !state.waiting) status.textContent = `segment ${state.idx} — ${doneCount()} déjà générés`;
+  };
+
+  body.append(bar, label, row, details);
+  updateConvertingCard(body, book);
+}
+
+function updateConvertingCard(body, book) {
+  const bar = body.querySelector(".conv-bar");
+  if (bar) { bar.max = book.total_chunks || 1; bar.value = book.done_chunks; }
+  const label = body.querySelector(".conv-label");
+  if (label) label.textContent = `${book.done_chunks} / ${book.total_chunks} segments${conversionEta(book)}`;
+  if (body._liveTick) body._liveTick();
+}
+
 function buildCard(book) {
   const card = document.createElement("div");
   card.className = "card";
@@ -663,10 +738,16 @@ function updateCard(book) {
   }
 
   const body = card.querySelector(".body");
-  // Ne jamais reconstruire le lecteur d'un livre terminé pendant l'écoute.
+  // Ne jamais reconstruire le lecteur d'un livre terminé pendant l'écoute,
+  // ni la pré-écoute d'une conversion en cours.
   if (book.status === "done" && body.dataset.ready === "1") return;
+  if (book.status === "converting" && body.dataset.mode === "converting") {
+    updateConvertingCard(body, book);
+    return;
+  }
   body.innerHTML = "";
   delete body.dataset.ready;
+  delete body.dataset.mode;
 
   const makeConvertBtn = (label) => {
     const btn = document.createElement("button");
@@ -690,15 +771,13 @@ function updateCard(book) {
     const note = document.createElement("div");
     note.className = "muted";
     note.textContent = "Dans la file d'attente — la synthèse démarre dès que le Mac est libre.";
-    body.append(note);
+    const row = document.createElement("div");
+    row.className = "row";
+    row.append(buildCancelBtn(book));
+    body.append(note, row);
   } else if (book.status === "converting") {
-    const bar = document.createElement("progress");
-    bar.max = book.total_chunks || 1;
-    bar.value = book.done_chunks;
-    const label = document.createElement("div");
-    label.className = "muted";
-    label.textContent = `${book.done_chunks} / ${book.total_chunks} segments${conversionEta(book)}`;
-    body.append(bar, label);
+    body.dataset.mode = "converting";
+    buildConvertingCard(body, book);
   } else if (book.status === "done") {
     body.dataset.ready = "1";
     buildPlayer(body, book);

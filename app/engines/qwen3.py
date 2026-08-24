@@ -42,6 +42,7 @@ class Qwen3Engine(Engine):
     def __init__(self) -> None:
         self._model = None
         self._model_kind: str | None = None  # "base" | "custom"
+        self._synth_count = 0
         # Loader injectable en tests ; None => mlx_audio.tts.utils.load_model
         self._load_model = None
 
@@ -133,3 +134,14 @@ class Qwen3Engine(Engine):
         if not parts:
             raise TTSError("qwen3 : aucun audio généré.")
         write_wav_int16(out_path, np.concatenate(parts), sample_rate)
+
+        # Hygiène mémoire sur les très longs livres : le cache de buffers MLX
+        # grossit au fil des centaines de chunks, on le vide périodiquement.
+        self._synth_count += 1
+        if self._synth_count % 20 == 0:
+            try:  # pragma: no cover - dépend de la présence de mlx
+                import mlx.core as mx
+
+                mx.clear_cache()
+            except Exception:  # noqa: BLE001
+                pass
