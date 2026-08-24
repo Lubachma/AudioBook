@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Livres audio</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0f1115">
+<link rel="icon" type="image/png" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
 <style>
   :root { --bg: #0f1115; --card: #1a1e27; --text: #e8eaf0; --muted: #9aa3b2; --accent: #5b8cff; --danger: #e05d5d; --ok: #4caf7d; }
   * { box-sizing: border-box; }
@@ -18,6 +22,7 @@
   button { cursor: pointer; border: none; }
   .btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
   .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .btn-small { font-size: 0.85rem; padding: 6px 10px; }
   .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
   .badge.extracting, .badge.converting { background: #3a4a6b; color: #cfe0ff; }
   .badge.extracted { background: #6b5a2a; color: #ffe9a8; }
@@ -28,30 +33,46 @@
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
   .warn { color: #ffcf7d; }
   a { color: var(--accent); }
-  #config-banner { display: none; }
+  details.bench summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+  .bench-voice { border-top: 1px solid #262c3a; padding: 10px 0 4px; }
+  .bench-voice .name { font-weight: 600; }
+  .bench-voice .status { font-size: 0.8rem; color: var(--muted); }
+  .bench-voice .status.error { color: var(--danger); }
+  .bench-voice .default-mark { color: #ffd166; }
+  .bench-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
 </style>
 </head>
 <body>
-<header><h1>📖 → 🎧 Livres audio</h1><div class="muted" id="voice-info"></div></header>
+<header><h1>📖 → 🎧 Livres audio</h1><div class="muted" id="engine-info"></div></header>
 <main>
-  <div class="card" id="config-banner">
-    <span class="warn">⚠ Clé API ElevenLabs non configurée sur le serveur (.env).</span>
-  </div>
-
   <div class="card">
     <form id="upload-form">
-      <input type="file" id="file" accept="application/pdf" required>
-      <select id="engine" title="Moteur de synthèse">
-        <option value="edge">Edge TTS (gratuit)</option>
-        <option value="elevenlabs">ElevenLabs (quota)</option>
-      </select>
+      <input type="file" id="file" accept=".pdf,.epub,application/pdf,application/epub+zip" required>
+      <select id="engine" title="Moteur de synthèse"></select>
       <select id="voice" title="Voix de lecture"></select>
       <select id="language">
         <option value="fr">Français</option>
         <option value="en">English</option>
       </select>
-      <button type="submit" class="btn-primary">Ajouter le PDF</button>
+      <button type="submit" class="btn-primary">Ajouter le livre (PDF ou EPUB)</button>
+      <div class="muted" id="engine-note"></div>
     </form>
+  </div>
+
+  <div class="card">
+    <details class="bench" id="bench">
+      <summary>🎧 Banc d'essai des voix — écouter et choisir la voix par défaut</summary>
+      <div class="bench-controls">
+        <select id="bench-engine"></select>
+        <select id="bench-language">
+          <option value="fr">Français</option>
+          <option value="en">English</option>
+        </select>
+        <button class="btn-primary btn-small" id="bench-generate">Générer les extraits</button>
+      </div>
+      <div class="muted" id="bench-sample"></div>
+      <div id="bench-voices"></div>
+    </details>
   </div>
 
   <div id="books"></div>
@@ -61,28 +82,57 @@
 const STATUS_LABELS = { extracting: "Extraction…", extracted: "Prêt", converting: "Conversion…", done: "Terminé", error: "Erreur" };
 const cards = new Map(); // id -> élément DOM, pour ne pas recréer les lecteurs en cours d'écoute
 const voiceNames = new Map(); // voice_id -> nom affichable
-let monthlyQuota = 100000;
+let CONFIG = { engines: [], monthly_quota_chars: 100000, default_engine: "", default_language: "fr" };
+
+function engineByName(name) { return CONFIG.engines.find((e) => e.name === name); }
 
 async function loadConfig() {
-  const cfg = await (await fetch("/api/config")).json();
-  monthlyQuota = cfg.monthly_quota_chars;
-  document.getElementById("voice-info").textContent = "Modèle : " + cfg.model_id;
-  document.getElementById("language").value = cfg.default_language;
-  if (!cfg.api_key_configured) document.getElementById("config-banner").style.display = "block";
+  CONFIG = await (await fetch("/api/config")).json();
+  document.getElementById("language").value = CONFIG.default_language;
 
-  const engineSelect = document.getElementById("engine");
-  engineSelect.value = cfg.default_engine;
-  await loadVoices(cfg);
-  engineSelect.addEventListener("change", () => loadVoices(cfg));
+  for (const selectId of ["engine", "bench-engine"]) {
+    const select = document.getElementById(selectId);
+    select.innerHTML = "";
+    for (const eng of CONFIG.engines) {
+      const opt = document.createElement("option");
+      opt.value = eng.name;
+      opt.textContent = eng.label + (eng.available ? "" : " — indisponible");
+      if (!eng.available) { opt.disabled = true; opt.title = eng.reason; }
+      select.appendChild(opt);
+    }
+    const preferred = engineByName(CONFIG.default_engine);
+    select.value = preferred && preferred.available
+      ? CONFIG.default_engine
+      : (CONFIG.engines.find((e) => e.available) || CONFIG.engines[0] || {}).name || "";
+  }
+
+  const active = CONFIG.engines.filter((e) => e.available).map((e) => e.label.split(" (")[0]);
+  document.getElementById("engine-info").textContent =
+    active.length ? "Moteurs : " + active.join(", ") : "Aucun moteur disponible — voir le README.";
+
+  await loadVoices();
+  document.getElementById("engine").addEventListener("change", loadVoices);
 }
 
-async function loadVoices(cfg) {
-  const engine = document.getElementById("engine").value;
+function updateEngineNote() {
+  const engine = engineByName(document.getElementById("engine").value);
+  const note = document.getElementById("engine-note");
+  if (!engine) { note.textContent = ""; return; }
+  if (!engine.available) { note.textContent = "⚠ " + engine.reason; return; }
+  note.textContent = engine.name === "elevenlabs"
+    ? "Moteur cloud payant : consomme le quota mensuel ElevenLabs."
+    : "Moteur local : gratuit et illimité, généré sur le Mac.";
+}
+
+async function loadVoices() {
+  const engineName = document.getElementById("engine").value;
   const select = document.getElementById("voice");
+  updateEngineNote();
   select.innerHTML = '<option value="">Chargement des voix…</option>';
-  const { voices } = await (await fetch("/api/voices?engine=" + engine)).json();
+  const { voices } = await (await fetch("/api/voices?engine=" + engineName)).json();
   select.innerHTML = "";
   for (const v of voices) voiceNames.set(v.voice_id, v.name);
+  const engine = engineByName(engineName) || {};
   if (voices.length) {
     for (const v of voices) {
       const opt = document.createElement("option");
@@ -90,13 +140,14 @@ async function loadVoices(cfg) {
       opt.textContent = v.name + (v.category === "cloned" ? " (clonée)" : "");
       select.appendChild(opt);
     }
+    select.value = voices.some((v) => v.voice_id === engine.default_voice)
+      ? engine.default_voice
+      : voices[0].voice_id;
   } else {
-    // Service injoignable ou clé absente : on propose au moins la voix par défaut
-    const fallback = engine === "edge" ? cfg.default_edge_voice : cfg.voice_id;
+    const fallback = engine.default_voice || "";
     voiceNames.set(fallback, "Voix par défaut");
     select.innerHTML = `<option value="${fallback}">Voix par défaut</option>`;
   }
-  select.value = engine === "edge" ? cfg.default_edge_voice : cfg.voice_id;
 }
 
 document.getElementById("upload-form").addEventListener("submit", async (e) => {
@@ -115,9 +166,12 @@ document.getElementById("upload-form").addEventListener("submit", async (e) => {
 });
 
 function formatChars(book) {
-  if (book.engine === "edge") return book.char_count.toLocaleString("fr-FR") + " caractères (gratuit)";
-  const pct = (book.char_count / monthlyQuota * 100).toFixed(0);
-  return book.char_count.toLocaleString("fr-FR") + " caractères ≈ " + pct + " % du quota mensuel";
+  const chars = book.char_count.toLocaleString("fr-FR") + " caractères";
+  if (book.engine === "elevenlabs") {
+    const pct = (book.char_count / CONFIG.monthly_quota_chars * 100).toFixed(0);
+    return chars + " ≈ " + pct + " % du quota mensuel";
+  }
+  return chars + " (gratuit, local)";
 }
 
 function buildCard(book) {
@@ -140,7 +194,8 @@ function updateCard(book) {
   badge.className = "badge " + book.status;
   badge.textContent = STATUS_LABELS[book.status] || book.status;
 
-  card.querySelector(".voice").textContent = book.voice_id ? "🎙 " + (voiceNames.get(book.voice_id) || book.voice_id) : "";
+  const voiceLabel = book.voice_label || voiceNames.get(book.voice_id) || book.voice_id;
+  card.querySelector(".voice").textContent = voiceLabel ? "🎙 " + voiceLabel : "";
   card.querySelector(".chars").textContent = book.char_count ? formatChars(book) : "";
 
   const body = card.querySelector(".body");
@@ -199,8 +254,14 @@ function updateCard(book) {
     }
     speed.onchange = () => audio.playbackRate = parseFloat(speed.value);
     const dl = document.createElement("a");
-    dl.href = audio.src; dl.download = book.title + ".mp3"; dl.textContent = "Télécharger";
+    dl.href = audio.src; dl.download = book.title + ".mp3"; dl.textContent = "MP3";
     row.append(speed, dl);
+    if (book.has_m4b) {
+      const m4b = document.createElement("a");
+      m4b.href = `/api/books/${book.id}/audio.m4b`;
+      m4b.textContent = "M4B (chapitres, app Livres)";
+      row.append(m4b);
+    }
     body.append(audio, row);
   } else if (book.status === "error") {
     const msg = document.createElement("div");
@@ -208,7 +269,7 @@ function updateCard(book) {
     msg.textContent = book.error || "Erreur inconnue.";
     body.appendChild(msg);
     // Reprise possible si le texte a été extrait (les segments déjà générés
-    // ne seront pas re-facturés)
+    // ne sont pas re-générés)
     if (book.char_count > 0) body.appendChild(makeConvertBtn("Réessayer la conversion"));
   }
 
@@ -231,6 +292,110 @@ function updateCard(book) {
   }
 }
 
+// ------------------------------------------------------------ banc d'essai
+
+const bench = document.getElementById("bench");
+const benchPlayers = new Map(); // voice_id -> élément, pour ne pas couper l'écoute
+
+function benchSelection() {
+  return {
+    engine: document.getElementById("bench-engine").value,
+    language: document.getElementById("bench-language").value,
+  };
+}
+
+async function refreshBench() {
+  if (!bench.open) return;
+  const { engine, language } = benchSelection();
+  if (!engine) return;
+  const resp = await fetch(`/api/previews?engine=${engine}&language=${language}`);
+  if (!resp.ok) return;
+  const data = await resp.json();
+  document.getElementById("bench-sample").textContent = "Extrait lu : « " + data.sample_text + " »";
+  const container = document.getElementById("bench-voices");
+  const engineCfg = engineByName(engine) || {};
+
+  for (const v of data.voices) {
+    const key = engine + "|" + language + "|" + v.voice_id;
+    let rowEl = benchPlayers.get(key);
+    if (!rowEl) {
+      rowEl = document.createElement("div");
+      rowEl.className = "bench-voice";
+      rowEl.dataset.key = key;
+      rowEl.innerHTML = `<div><span class="name"></span> <span class="default-mark"></span></div>
+        <div class="status"></div><div class="player"></div><div class="actions row"></div>`;
+      rowEl.querySelector(".name").textContent = v.name;
+      benchPlayers.set(key, rowEl);
+    }
+    if (!rowEl.isConnected) container.appendChild(rowEl);
+
+    rowEl.querySelector(".default-mark").textContent =
+      engineCfg.default_voice === v.voice_id && CONFIG.default_engine === engine ? "⭐ voix par défaut" : "";
+
+    const statusEl = rowEl.querySelector(".status");
+    statusEl.className = "status" + (v.status === "error" ? " error" : "");
+    statusEl.textContent = {
+      missing: "extrait non généré",
+      pending: "génération en cours…",
+      error: "erreur : " + v.error,
+      ready: "",
+    }[v.status];
+
+    const player = rowEl.querySelector(".player");
+    if (v.status === "ready" && !player.querySelector("audio")) {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = `/api/previews/audio?engine=${engine}&voice_id=${encodeURIComponent(v.voice_id)}&language=${language}`;
+      player.appendChild(audio);
+    }
+
+    const actions = rowEl.querySelector(".actions");
+    if (v.status === "ready" && !actions.querySelector("button")) {
+      const setDefault = document.createElement("button");
+      setDefault.className = "btn-primary btn-small";
+      setDefault.textContent = "⭐ Définir comme voix par défaut";
+      setDefault.onclick = async () => {
+        const resp = await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ engine, voice_id: v.voice_id }),
+        });
+        if (resp.ok) { CONFIG = await resp.json(); await loadVoices(); refreshBench(); }
+      };
+      actions.appendChild(setDefault);
+    }
+  }
+
+  // Retirer les lignes des voix qui n'existent plus dans la sélection courante.
+  for (const child of [...container.children]) {
+    if (!data.voices.some((v) => child.dataset.key === engine + "|" + language + "|" + v.voice_id)) {
+      child.remove();
+    }
+  }
+}
+
+document.getElementById("bench-generate").addEventListener("click", async () => {
+  const { engine, language } = benchSelection();
+  const resp = await fetch("/api/previews", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ engine, language, all: true }),
+  });
+  if (!resp.ok) { alert((await resp.json()).detail || "Échec"); return; }
+  refreshBench();
+});
+
+for (const id of ["bench-engine", "bench-language"]) {
+  document.getElementById(id).addEventListener("change", () => {
+    document.getElementById("bench-voices").innerHTML = "";
+    refreshBench();
+  });
+}
+bench.addEventListener("toggle", refreshBench);
+
+// ------------------------------------------------------------ rafraîchissement
+
 async function refresh() {
   try {
     const books = await (await fetch("/api/books")).json();
@@ -238,6 +403,7 @@ async function refresh() {
     for (const book of books) { seen.add(book.id); updateCard(book); }
     for (const [id, card] of cards) if (!seen.has(id)) { card.remove(); cards.delete(id); }
   } catch (e) { /* serveur injoignable : on réessaiera au prochain tick */ }
+  try { await refreshBench(); } catch (e) { /* idem */ }
 }
 
 loadConfig().then(refresh);

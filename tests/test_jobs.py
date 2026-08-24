@@ -1,81 +1,203 @@
-"""Tests du pipeline de jobs : assemblage ffmpeg et reprise sans re-facturation."""
+"""Tests du pipeline de jobs : dispatch moteur, reprise sans re-synthèse, migrations."""
 
 import sqlite3
-import subprocess
-from pathlib import Path
 
 import pytest
 
-from app import jobs
+from app import engines, jobs
+from app.chapters import Chapter
 from app.config import settings
 
-
-@pytest.fixture()
-def data_dir(tmp_path, monkeypatch):
-    settings.data_dir = tmp_path / "data"
-    settings.ensure_dirs()
-    jobs.init_db()
-    return settings.data_dir
+from .conftest import FakeEngine
 
 
-def _make_book():
-    job_id = jobs.create_job(title="test", language="fr", engine="elevenlabs")
-    jobs.text_path(job_id).write_text("Première phrase. Deuxième phrase.", encoding="utf-8")
+@pytest.fixture(autouse=True)
+def _quiet_merge(monkeypatch):
+    """L'assemblage réel (ffmpeg) est testé dans test_audio.py."""
+    monkeypatch.setattr(
+        jobs.audio,
+        "merge_book",
+        lambda chunk_dir, ext, mp3_out, m4b_out, **kw: (
+            mp3_out.write_bytes(b"MERGED"),
+            m4b_out.write_bytes(b"M4B"),
+        ),
+    )
+
+
+def _make_book(engine="fake", text="Première phrase. Deuxième phrase."):
+    job_id = jobs.create_job(title="test", language="fr", engine=engine)
+    jobs.text_path(job_id).write_text(text, encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=len(text))
     return job_id
 
 
-def test_merge_chunks_writes_absolute_paths(data_dir, monkeypatch, tmp_path):
-    """Le concat demuxer de ffmpeg résout les chemins relatifs par rapport au
-    dossier du fichier liste, pas au CWD : la liste doit être en absolu.
-    Reproduit le bug de production (data_dir relatif -> exit 254)."""
-    monkeypatch.chdir(tmp_path)  # simule le WorkingDirectory du service
-    chunk_directory = Path("data/audio/job_chunks")  # relatif, comme en prod
-    chunk_directory.mkdir(parents=True)
-    (chunk_directory / "chunk_0001.mp3").write_bytes(b"FAKE1")
-    (chunk_directory / "chunk_0002.mp3").write_bytes(b"FAKE2")
-
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["list_content"] = (chunk_directory / "concat.txt").read_text()
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    jobs.merge_chunks(chunk_directory, Path("data/audio/out.mp3"))
-
-    for line in captured["list_content"].splitlines():
-        path = line.removeprefix("file '").removesuffix("'")
-        assert path.startswith("/"), f"chemin relatif dans la liste ffmpeg : {path}"
+def _seed_valid_meta(job_id, engine_name="fake"):
+    """chunks.meta.json cohérent avec l'état courant (comme une vraie 1re tentative)."""
+    engine = engines.get_engine(engine_name)
+    text = jobs.text_path(job_id).read_text(encoding="utf-8")
+    job = jobs.get_job(job_id)
+    fingerprint = jobs._fingerprint(engine, text, [Chapter(title=job["title"], offset=0)])
+    directory = jobs.chunk_dir(job_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    jobs.write_chunks_meta(directory, engine, 2, fingerprint)
+    return directory
 
 
-def test_run_conversion_skips_existing_chunks(data_dir, monkeypatch):
-    """Un chunk déjà présent sur disque ne doit pas être re-facturé à ElevenLabs."""
-    monkeypatch.setattr(settings, "chunk_max_chars", 20)  # force 2 chunks
+def test_run_conversion_skips_existing_chunks(data_dir, fake_engine, monkeypatch):
+    """Un chunk déjà présent sur disque n'est pas re-synthétisé (reprise)."""
+    monkeypatch.setattr(FakeEngine, "chunk_max_chars", 20)  # force 2 chunks
     job_id = _make_book()
-    jobs.update_job(job_id, status="extracted", char_count=38)
-
-    # chunk 1 déjà généré lors d'une tentative précédente
-    chunk_directory = jobs.chunk_dir(job_id)
-    chunk_directory.mkdir(parents=True)
-    (chunk_directory / "chunk_0001.mp3").write_bytes(b"DEJA LA")
-
-    calls = []
-
-    def fake_tts(text, out_path, **kw):
-        calls.append(text)
-        out_path.write_bytes(b"NOUVEAU")
-
-    monkeypatch.setattr(jobs, "synthesize_with_retry", fake_tts)
-    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"MERGED"))
+    directory = _seed_valid_meta(job_id)
+    (directory / "chunk_0001.mp3").write_bytes(b"DEJA LA")
 
     jobs.run_conversion(job_id)
 
-    assert len(calls) == 1, f"chunk existant re-facturé : {calls}"
+    assert len(fake_engine.calls) == 1, f"chunk existant re-synthétisé : {fake_engine.calls}"
     assert jobs.get_job(job_id)["status"] == "done"
 
 
-def test_init_db_migrates_old_schema(tmp_path, monkeypatch):
-    """Une base créée avant l'ajout de la colonne voice_id est migrée sans perte."""
+def test_stale_chunks_are_purged(data_dir, fake_engine, monkeypatch):
+    """Un dossier de chunks d'un AUTRE plan de découpage (moteur/params changés)
+    est purgé avant reprise, sinon on mélangerait des chunks incompatibles."""
+    monkeypatch.setattr(FakeEngine, "chunk_max_chars", 20)  # 2 chunks
+    job_id = _make_book()
+    directory = jobs.chunk_dir(job_id)
+    directory.mkdir(parents=True)
+    (directory / "chunk_0001.mp3").write_bytes(b"ANCIEN MOTEUR")  # pas de meta -> obsolète
+
+    jobs.run_conversion(job_id)
+
+    assert len(fake_engine.calls) == 2  # tout re-synthétisé
+    assert jobs.get_job(job_id)["status"] == "done"
+
+
+def test_zero_byte_chunk_is_resynthesized(data_dir, fake_engine, monkeypatch):
+    """Un chunk vide (0 octet) n'est pas considéré comme terminé à la reprise."""
+    monkeypatch.setattr(FakeEngine, "chunk_max_chars", 20)
+    job_id = _make_book()
+    directory = _seed_valid_meta(job_id)
+    (directory / "chunk_0001.mp3").write_bytes(b"")  # résidu vide
+
+    jobs.run_conversion(job_id)
+
+    assert len(fake_engine.calls) == 2
+
+
+def test_run_conversion_uses_job_voice(data_dir, fake_engine):
+    job_id = jobs.create_job(title="t", language="fr", voice_id="voix-du-job", engine="fake")
+    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=11)
+
+    jobs.run_conversion(job_id)
+
+    assert fake_engine.calls[0]["voice_id"] == "voix-du-job"
+
+
+def test_run_conversion_falls_back_to_engine_default_voice(data_dir, fake_engine):
+    job_id = jobs.create_job(title="t", language="fr", engine="fake")  # pas de voix choisie
+    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=11)
+
+    jobs.run_conversion(job_id)
+
+    assert fake_engine.calls[0]["voice_id"] == "fv1"
+
+
+def test_run_conversion_uses_bench_default_voice(data_dir, fake_engine):
+    """La voix choisie au banc d'essai (table settings) prime sur le défaut du moteur."""
+    from app.settings_store import set_setting
+
+    set_setting("default_voice:fake", "fv2")
+    job_id = jobs.create_job(title="t", language="fr", engine="fake")
+    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=11)
+
+    jobs.run_conversion(job_id)
+
+    assert fake_engine.calls[0]["voice_id"] == "fv2"
+
+
+def test_run_conversion_default_engine_fallback(data_dir, fake_engine, monkeypatch):
+    """Job sans moteur explicite -> moteur par défaut de la config."""
+    monkeypatch.setattr(settings, "default_engine", "fake")
+    job_id = jobs.create_job(title="t", language="fr")
+    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=11)
+
+    jobs.run_conversion(job_id)
+
+    assert len(fake_engine.calls) == 1
+    assert jobs.get_job(job_id)["status"] == "done"
+
+
+def test_run_conversion_edge_engine_rejected(data_dir, fake_engine):
+    """Les livres historiques edge-tts ne sont plus convertibles (message clair)."""
+    job_id = _make_book(engine="edge")
+
+    jobs.run_conversion(job_id)
+
+    job = jobs.get_job(job_id)
+    assert job["status"] == "error"
+    assert "edge-tts" in job["error"]
+
+
+def test_run_conversion_unavailable_engine_reports_reason(data_dir, monkeypatch):
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "")
+    job_id = _make_book(engine="elevenlabs")
+
+    jobs.run_conversion(job_id)
+
+    job = jobs.get_job(job_id)
+    assert job["status"] == "error"
+    assert "indisponible" in job["error"]
+
+
+def test_run_conversion_noop_on_done_job(data_dir, fake_engine):
+    """Garde anti double-traitement : un livre terminé n'est jamais re-synthétisé."""
+    job_id = _make_book()
+    jobs.update_job(job_id, status="done")
+
+    jobs.run_conversion(job_id)  # ne doit rien faire, ni lever d'erreur
+
+    assert fake_engine.calls == []
+
+
+def test_conversion_writes_chapter_mapping_to_merge(data_dir, fake_engine, monkeypatch):
+    """Les chunks sont assignés à leur chapitre et transmis à l'assemblage."""
+    from app.chapters import save_chapters
+
+    monkeypatch.setattr(FakeEngine, "chunk_max_chars", 30)
+    job_id = jobs.create_job(title="t", language="fr", engine="fake")
+    text = "Chapitre un. Du texte ici. Chapitre deux. Encore du texte."
+    jobs.text_path(job_id).write_text(text, encoding="utf-8")
+    save_chapters(
+        jobs.chapters_path(job_id),
+        [Chapter("Chapitre un", 0), Chapter("Chapitre deux", text.index("Chapitre deux"))],
+    )
+    jobs.update_job(job_id, status="extracted", char_count=len(text))
+
+    captured = {}
+
+    def fake_merge(chunk_dir, ext, mp3_out, m4b_out, **kw):
+        captured.update(kw)
+        mp3_out.write_bytes(b"M")
+        m4b_out.write_bytes(b"M4B")
+
+    monkeypatch.setattr(jobs.audio, "merge_book", fake_merge)
+
+    jobs.run_conversion(job_id)
+
+    assert captured["chapter_titles"] == ["Chapitre un", "Chapitre deux"]
+    assert sorted(set(captured["chunk_chapters"])) == [0, 1]
+
+
+def test_create_job_stores_voice_id(data_dir):
+    job_id = jobs.create_job(title="t", language="fr", voice_id="voix42")
+    assert jobs.get_job(job_id)["voice_id"] == "voix42"
+
+
+def test_init_db_migrates_old_schema(tmp_path):
+    """Une base d'avant la refonte (sans voice_label/source_type) est migrée sans perte."""
     settings.data_dir = tmp_path / "data"
     settings.ensure_dirs()
     with sqlite3.connect(settings.db_path) as conn:
@@ -94,150 +216,13 @@ def test_init_db_migrates_old_schema(tmp_path, monkeypatch):
     job = jobs.get_job("abc")
     assert job is not None
     assert job["voice_id"] == ""
-
-
-def test_create_job_stores_voice_id(data_dir):
-    job_id = jobs.create_job(title="t", language="fr", voice_id="voix42")
-    assert jobs.get_job(job_id)["voice_id"] == "voix42"
-
-
-def test_run_conversion_uses_job_voice(data_dir, monkeypatch):
-    job_id = jobs.create_job(title="t", language="fr", voice_id="voix-du-job", engine="elevenlabs")
-    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
-    jobs.update_job(job_id, status="extracted", char_count=11)
-
-    captured = {}
-
-    def fake_tts(text, out_path, **kw):
-        captured.update(kw)
-        out_path.write_bytes(b"X")
-
-    monkeypatch.setattr(jobs, "synthesize_with_retry", fake_tts)
-    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
-
-    jobs.run_conversion(job_id)
-
-    assert captured["voice_id"] == "voix-du-job"
-
-
-def test_run_conversion_falls_back_to_default_voice(data_dir, monkeypatch):
-    job_id = jobs.create_job(title="t", language="fr", engine="elevenlabs")  # pas de voix choisie
-    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
-    jobs.update_job(job_id, status="extracted", char_count=11)
-
-    captured = {}
-
-    def fake_tts(text, out_path, **kw):
-        captured.update(kw)
-        out_path.write_bytes(b"X")
-
-    monkeypatch.setattr(jobs, "synthesize_with_retry", fake_tts)
-    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
-
-    jobs.run_conversion(job_id)
-
-    assert captured["voice_id"] == settings.elevenlabs_voice_id
-
-
-def test_init_db_migrates_adds_engine(tmp_path, monkeypatch):
-    """La colonne engine est ajoutée aux bases existantes (défaut elevenlabs)."""
-    settings.data_dir = tmp_path / "data"
-    settings.ensure_dirs()
-    with sqlite3.connect(settings.db_path) as conn:
-        conn.execute(
-            "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT NOT NULL, language TEXT NOT NULL,"
-            " status TEXT NOT NULL, char_count INTEGER NOT NULL DEFAULT 0,"
-            " total_chunks INTEGER NOT NULL DEFAULT 0, done_chunks INTEGER NOT NULL DEFAULT 0,"
-            " error TEXT, created_at TEXT NOT NULL, voice_id TEXT NOT NULL DEFAULT '')"
-        )
-        conn.execute(
-            "INSERT INTO jobs (id, title, language, status, created_at) VALUES ('abc', 't', 'fr', 'extracted', '2024-01-01')"
-        )
-
-    jobs.init_db()
-
-    assert jobs.get_job("abc")["engine"] == "elevenlabs"
-
-
-def test_run_conversion_dispatches_to_edge(data_dir, monkeypatch):
-    job_id = jobs.create_job(title="t", language="fr", voice_id="fr-FR-HenriNeural", engine="edge")
-    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
-    jobs.update_job(job_id, status="extracted", char_count=11)
-
-    captured = {}
-
-    def fake_edge(text, out_path, **kw):
-        captured.update(kw)
-        out_path.write_bytes(b"E")
-
-    monkeypatch.setattr(jobs, "synthesize_edge_with_retry", fake_edge)
-    monkeypatch.setattr(
-        jobs, "synthesize_with_retry", lambda *a, **kw: pytest.fail("ElevenLabs ne doit pas être appelé")
-    )
-    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
-
-    jobs.run_conversion(job_id)
-
-    assert captured["voice"] == "fr-FR-HenriNeural"
-    assert jobs.get_job(job_id)["status"] == "done"
-
-
-def test_run_conversion_default_engine_fallback(data_dir, monkeypatch):
-    """Job sans moteur explicite -> moteur par défaut de la config."""
-    monkeypatch.setattr(settings, "default_engine", "edge")
-    job_id = jobs.create_job(title="t", language="fr")
-    jobs.text_path(job_id).write_text("Une phrase.", encoding="utf-8")
-    jobs.update_job(job_id, status="extracted", char_count=11)
-
-    used = []
-
-    monkeypatch.setattr(
-        jobs, "synthesize_edge_with_retry", lambda t, o, **kw: (used.append("edge"), o.write_bytes(b"E"))
-    )
-    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
-
-    jobs.run_conversion(job_id)
-
-    assert used == ["edge"]
-
-
-def test_run_conversion_noop_on_done_job(data_dir, monkeypatch):
-    """Garde anti double-traitement : un livre terminé n'est jamais re-synthétisé."""
-    job_id = _make_book()
-    jobs.update_job(job_id, status="done")
-
-    monkeypatch.setattr(
-        jobs, "synthesize_with_retry", lambda *a, **kw: pytest.fail("TTS appelé sur un livre terminé")
-    )
-    monkeypatch.setattr(
-        jobs, "synthesize_edge_with_retry", lambda *a, **kw: pytest.fail("TTS appelé sur un livre terminé")
-    )
-    jobs.run_conversion(job_id)  # ne doit rien faire, ni lever d'erreur
-
-
-def test_zero_byte_chunk_is_resynthesized(data_dir, monkeypatch):
-    """Un chunk vide (0 octet) n'est pas considéré comme terminé à la reprise."""
-    job_id = _make_book()
-    jobs.update_job(job_id, status="extracted", char_count=38)
-    monkeypatch.setattr(settings, "chunk_max_chars", 20)  # 2 chunks
-
-    chunk_directory = jobs.chunk_dir(job_id)
-    chunk_directory.mkdir(parents=True)
-    (chunk_directory / "chunk_0001.mp3").write_bytes(b"")  # résidu vide
-
-    calls = []
-    monkeypatch.setattr(
-        jobs, "synthesize_with_retry", lambda t, o, **kw: (calls.append(t), o.write_bytes(b"X"))
-    )
-    monkeypatch.setattr(jobs, "merge_chunks", lambda d, o: o.write_bytes(b"M"))
-
-    jobs.run_conversion(job_id)
-
-    assert len(calls) == 2  # les deux chunks ont été synthétisés
+    assert job["engine"] == "elevenlabs"
+    assert job["voice_label"] == ""
+    assert job["source_type"] == "pdf"
 
 
 def test_recover_interrupted_reenqueues_extractions(data_dir, monkeypatch):
-    """Un redémarrage pendant l'extraction la relance (le PDF est encore là)."""
+    """Un redémarrage pendant l'extraction la relance (le fichier source est encore là)."""
     job_id = jobs.create_job(title="t", language="fr")
     assert jobs.get_job(job_id)["status"] == "extracting"
 
@@ -248,3 +233,17 @@ def test_recover_interrupted_reenqueues_extractions(data_dir, monkeypatch):
 
     assert jobs.get_job(job_id)["status"] == "extracting"  # pas d'erreur "ré-uploadez"
     assert (job_id, "extract") in enqueued
+
+
+def test_delete_job_removes_all_artifacts(data_dir, fake_engine):
+    job_id = _make_book()
+    jobs.run_conversion(job_id)
+    assert jobs.audio_path(job_id).exists()
+    assert jobs.m4b_path(job_id).exists()
+
+    jobs.delete_job(job_id)
+
+    assert not jobs.audio_path(job_id).exists()
+    assert not jobs.m4b_path(job_id).exists()
+    assert not jobs.text_path(job_id).exists()
+    assert jobs.get_job(job_id) is None

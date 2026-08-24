@@ -1,22 +1,26 @@
-"""Tests d'intégration de l'API : ElevenLabs et ffmpeg sont mockés."""
+"""Tests d'intégration de l'API : moteurs TTS et ffmpeg sont mockés."""
 
 import pytest
 from fastapi.testclient import TestClient
 from reportlab.lib.pagesizes import LETTER
 from reportlab.pdfgen import canvas
 
-from app import jobs
+from app import engines, jobs, main
 from app.config import settings
+from app.engines import TTSError
 from app.main import app
+
+from .conftest import make_epub
 
 
 @pytest.fixture()
-def client(tmp_path, monkeypatch):
+def client(tmp_path, monkeypatch, fake_engine):
     # Données isolées dans un répertoire temporaire
     settings.data_dir = tmp_path / "data"
     settings.ensure_dirs()
     settings.chunk_max_chars = 4000
-    monkeypatch.setattr(settings, "default_engine", "elevenlabs")
+    monkeypatch.setattr(settings, "default_engine", "fake")
+    monkeypatch.setattr(main, "_voices_cache", {})
     jobs.init_db()  # le thread worker persiste entre les tests et ne le fait qu'une fois
 
     # Traitement synchrone des jobs pour des tests déterministes
@@ -27,18 +31,14 @@ def client(tmp_path, monkeypatch):
             jobs.run_conversion(job_id)
 
     monkeypatch.setattr(jobs, "enqueue", run_now)
-    # Fausses réponses TTS : chaque chunk devient un petit fichier binaire
-    monkeypatch.setattr(
-        jobs,
-        "synthesize_with_retry",
-        lambda text, out_path, **kw: out_path.write_bytes(b"FAKEMP3" + text[:8].encode()),
-    )
-    # Faux ffmpeg : concaténation binaire simple
-    def fake_merge(chunk_dir, out_path):
-        data = b"".join(f.read_bytes() for f in sorted(chunk_dir.glob("chunk_*.mp3")))
-        out_path.write_bytes(data)
 
-    monkeypatch.setattr(jobs, "merge_chunks", fake_merge)
+    # Faux ffmpeg : concaténation binaire simple + M4B factice
+    def fake_merge(chunk_dir, ext, mp3_out, m4b_out, **kw):
+        data = b"".join(f.read_bytes() for f in sorted(chunk_dir.glob(f"chunk_*.{ext}")))
+        mp3_out.write_bytes(data)
+        m4b_out.write_bytes(b"M4B" + data)
+
+    monkeypatch.setattr(jobs.audio, "merge_book", fake_merge)
 
     with TestClient(app) as c:
         yield c
@@ -54,8 +54,13 @@ def _make_pdf(path, text="Bonjour le monde. Ceci est un livre de test avec assez
 
 def test_config_endpoint(client):
     cfg = client.get("/api/config").json()
-    assert cfg["model_id"] == "eleven_multilingual_v2"
+    assert cfg["default_engine"] == "fake"
     assert "monthly_quota_chars" in cfg
+    names = [e["name"] for e in cfg["engines"]]
+    assert {"qwen3", "kyutai", "elevenlabs", "fake"} <= set(names)
+    fake = next(e for e in cfg["engines"] if e["name"] == "fake")
+    assert fake["available"] is True
+    assert fake["default_voice"] == "fv1"
 
 
 def test_full_cycle_upload_convert_listen_delete(client, tmp_path):
@@ -71,28 +76,59 @@ def test_full_cycle_upload_convert_listen_delete(client, tmp_path):
     book = next(b for b in books if b["id"] == job_id)
     assert book["status"] == "extracted"
     assert book["char_count"] > 0
+    assert book["source_type"] == "pdf"
 
-    # Conversion (TTS mockée)
+    # Conversion (TTS mockée via le faux moteur)
     resp = client.post(f"/api/books/{job_id}/convert")
     assert resp.status_code == 200
     book = client.get("/api/books").json()[0]
     assert book["status"] == "done"
     assert book["total_chunks"] == book["done_chunks"] >= 1
+    assert book["has_m4b"] is True
 
-    # Streaming audio
+    # Streaming audio MP3 + téléchargement M4B
     audio = client.get(f"/api/books/{job_id}/audio")
     assert audio.status_code == 200
     assert audio.headers["content-type"] == "audio/mpeg"
     assert audio.content.startswith(b"FAKEMP3")
+
+    m4b = client.get(f"/api/books/{job_id}/audio.m4b")
+    assert m4b.status_code == 200
+    assert m4b.content.startswith(b"M4B")
 
     # Suppression
     assert client.delete(f"/api/books/{job_id}").status_code == 204
     assert client.get(f"/api/books/{job_id}/audio").status_code == 404
 
 
-def test_rejects_non_pdf(client, tmp_path):
+def test_epub_upload_and_chapters(client, tmp_path):
+    epub = make_epub(
+        tmp_path / "livre.epub",
+        [
+            ("Chapitre premier", "Il était une fois un test qui voulait des chapitres. " * 3),
+            ("Chapitre second", "La suite du livre continue ici avec encore du texte. " * 3),
+        ],
+    )
+    with epub.open("rb") as f:
+        resp = client.post(
+            "/api/books", files={"file": ("livre.epub", f, "application/epub+zip")}, data={"language": "fr"}
+        )
+    assert resp.status_code == 201
+    job_id = resp.json()["id"]
+
+    book = next(b for b in client.get("/api/books").json() if b["id"] == job_id)
+    assert book["status"] == "extracted"
+    assert book["source_type"] == "epub"
+
+    from app.chapters import load_chapters
+
+    chapters = load_chapters(jobs.chapters_path(job_id))
+    assert [c.title for c in chapters] == ["Chapitre premier", "Chapitre second"]
+
+
+def test_rejects_unsupported_extension(client, tmp_path):
     txt = tmp_path / "doc.txt"
-    txt.write_text("pas un pdf")
+    txt.write_text("pas un livre")
     with txt.open("rb") as f:
         resp = client.post("/api/books", files={"file": ("doc.txt", f, "text/plain")})
     assert resp.status_code == 400
@@ -104,10 +140,10 @@ def test_convert_requires_extracted_status(client):
 
 
 def test_convert_allowed_from_error_status(client):
-    """Un job en erreur (ex : quota ou ffmpeg) avec texte extrait peut être relancé."""
-    job_id = jobs.create_job(title="livre", language="fr")
+    """Un job en erreur (ex : ffmpeg) avec texte extrait peut être relancé."""
+    job_id = jobs.create_job(title="livre", language="fr", engine="fake")
     jobs.text_path(job_id).write_text("Du texte à convertir.", encoding="utf-8")
-    jobs.update_job(job_id, status="error", char_count=21, error="quota atteint")
+    jobs.update_job(job_id, status="error", char_count=21, error="panne")
 
     resp = client.post(f"/api/books/{job_id}/convert")
     assert resp.status_code == 200
@@ -123,94 +159,89 @@ def test_convert_error_without_extracted_text_rejected(client):
     assert resp.status_code == 409
 
 
+def test_convert_legacy_edge_book_rejected_with_message(client):
+    """Les livres historiques edge-tts restent lisibles mais pas re-convertibles."""
+    job_id = jobs.create_job(title="ancien", language="fr", engine="edge")
+    jobs.text_path(job_id).write_text("Du texte.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=9)
+
+    resp = client.post(f"/api/books/{job_id}/convert")
+    assert resp.status_code == 409
+    assert "edge-tts" in resp.json()["detail"]
+
+
+def test_convert_unavailable_engine_rejected(client, monkeypatch):
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "")
+    job_id = jobs.create_job(title="livre", language="fr", engine="elevenlabs")
+    jobs.text_path(job_id).write_text("Du texte.", encoding="utf-8")
+    jobs.update_job(job_id, status="extracted", char_count=9)
+
+    resp = client.post(f"/api/books/{job_id}/convert")
+    assert resp.status_code == 409
+    assert "indisponible" in resp.json()["detail"]
+
+
 def test_index_served(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "Livres audio" in resp.text
 
 
-def test_voices_endpoint_lists_account_voices(client, monkeypatch):
-    from app import main
-
-    monkeypatch.setattr(main, "_voices_cache", {})
-    monkeypatch.setattr(settings, "elevenlabs_api_key", "cle-test")
-    monkeypatch.setattr(
-        main,
-        "list_voices",
-        lambda key: [{"voice_id": "v1", "name": "Alice", "category": "premade"}],
-    )
-
-    data = client.get("/api/voices").json()
-    assert data["voices"] == [{"voice_id": "v1", "name": "Alice", "category": "premade"}]
+def test_voices_endpoint_lists_engine_voices(client):
+    data = client.get("/api/voices?engine=fake").json()
+    assert data["voices"][0] == {
+        "voice_id": "fv1",
+        "name": "Fausse voix",
+        "category": "test",
+        "language": "fr",
+    }
 
 
-def test_voices_endpoint_without_key_returns_empty(client, monkeypatch):
-    from app import main
-
-    monkeypatch.setattr(main, "_voices_cache", {})
+def test_voices_endpoint_elevenlabs_without_key_returns_empty(client, monkeypatch):
     monkeypatch.setattr(settings, "elevenlabs_api_key", "")
-
-    data = client.get("/api/voices").json()
+    data = client.get("/api/voices?engine=elevenlabs").json()
     assert data["voices"] == []
 
 
-def test_voices_endpoint_elevenlabs_failure_returns_empty(client, monkeypatch):
-    from app import main, tts
+def test_voices_endpoint_cloud_failure_returns_empty(client, monkeypatch):
+    def boom():
+        raise TTSError("panne")
 
-    monkeypatch.setattr(main, "_voices_cache", {})
+    monkeypatch.setattr(engines.get_engine("elevenlabs"), "list_voices", boom)
     monkeypatch.setattr(settings, "elevenlabs_api_key", "cle-test")
-
-    def boom(key):
-        raise tts.TTSError("panne")
-
-    monkeypatch.setattr(main, "list_voices", boom)
-    data = client.get("/api/voices").json()
+    data = client.get("/api/voices?engine=elevenlabs").json()
     assert data["voices"] == []
 
 
-def test_upload_stores_chosen_voice(client, tmp_path):
+def test_upload_stores_chosen_voice_and_label(client, tmp_path):
     pdf = _make_pdf(tmp_path / "livre2.pdf")
     with pdf.open("rb") as f:
         resp = client.post(
             "/api/books",
             files={"file": ("livre2.pdf", f, "application/pdf")},
-            data={"language": "en", "voice_id": "voix-choisie"},
+            data={"language": "en", "voice_id": "fv2", "engine": "fake"},
         )
     assert resp.status_code == 201
     book = client.get("/api/books").json()[0]
-    assert book["voice_id"] == "voix-choisie"
+    assert book["voice_id"] == "fv2"
+    assert book["voice_label"] == "Fake voice"
+    assert book["engine"] == "fake"
 
 
-def test_voices_endpoint_edge_engine(client, monkeypatch):
-    from app import main
-
-    monkeypatch.setattr(main, "_voices_cache", {})
-    monkeypatch.setattr(
-        main,
-        "list_edge_voices",
-        lambda: [{"voice_id": "fr-FR-DeniseNeural", "name": "Denise (fr-FR, F)", "category": "edge"}],
-    )
-
-    data = client.get("/api/voices?engine=edge").json()
-    assert data["voices"][0]["voice_id"] == "fr-FR-DeniseNeural"
-
-
-def test_upload_stores_engine(client, tmp_path):
+def test_upload_with_removed_edge_engine_rejected(client, tmp_path):
     pdf = _make_pdf(tmp_path / "livre3.pdf")
     with pdf.open("rb") as f:
         resp = client.post(
             "/api/books",
             files={"file": ("livre3.pdf", f, "application/pdf")},
-            data={"language": "fr", "voice_id": "fr-FR-DeniseNeural", "engine": "edge"},
+            data={"language": "fr", "engine": "edge"},
         )
-    assert resp.status_code == 201
-    book = client.get("/api/books").json()[0]
-    assert book["engine"] == "edge"
+    assert resp.status_code == 400
 
 
 def test_convert_sets_converting_status_before_enqueue(client, monkeypatch):
     """Le statut transitoire empêche un second clic de re-facturer le livre."""
-    job_id = jobs.create_job(title="livre", language="fr", engine="elevenlabs")
+    job_id = jobs.create_job(title="livre", language="fr", engine="fake")
     jobs.text_path(job_id).write_text("Du texte.", encoding="utf-8")
     jobs.update_job(job_id, status="extracted", char_count=9)
 
@@ -251,10 +282,52 @@ def test_invalid_engine_rejected_on_upload(client, tmp_path):
         resp = client.post(
             "/api/books",
             files={"file": ("livre5.pdf", f, "application/pdf")},
-            data={"language": "fr", "engine": "Edge"},  # typo -> rejet, pas de facturation ElevenLabs
+            data={"language": "fr", "engine": "Fake"},  # casse différente -> rejet
         )
     assert resp.status_code == 400
 
 
 def test_invalid_engine_rejected_on_voices(client):
     assert client.get("/api/voices?engine=Edge").status_code == 400
+
+
+# --------------------------------------------------------- banc d'essai voix
+
+def test_previews_flow_and_default_voice(client, monkeypatch, fake_engine):
+    # Génération synchrone : on court-circuite la file comme pour les jobs
+    from app import previews
+
+    monkeypatch.setattr(
+        jobs, "enqueue_preview", lambda e, v, lang: previews.run_preview(
+            {"engine": e, "voice_id": v, "language": lang}
+        )
+    )
+
+    listing = client.get("/api/previews?engine=fake&language=fr").json()
+    assert [v["voice_id"] for v in listing["voices"]] == ["fv1"]  # fv2 est en anglais
+    assert listing["voices"][0]["status"] == "missing"
+
+    resp = client.post("/api/previews", json={"engine": "fake", "language": "fr", "all": True})
+    assert resp.status_code == 202
+    assert resp.json()["queued"] == 1
+
+    listing = client.get("/api/previews?engine=fake&language=fr").json()
+    assert listing["voices"][0]["status"] == "ready"
+
+    audio = client.get("/api/previews/audio?engine=fake&voice_id=fv1&language=fr")
+    assert audio.status_code == 200
+    assert audio.content.startswith(b"FAKEMP3")
+
+    # Choix de la voix par défaut -> persisté et visible dans /api/config
+    resp = client.put("/api/settings", json={"engine": "fake", "voice_id": "fv1"})
+    assert resp.status_code == 200
+    cfg = resp.json()
+    assert cfg["default_engine"] == "fake"
+    fake_cfg = next(e for e in cfg["engines"] if e["name"] == "fake")
+    assert fake_cfg["default_voice"] == "fv1"
+
+
+def test_previews_unavailable_engine_rejected(client, monkeypatch):
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "")
+    resp = client.post("/api/previews", json={"engine": "elevenlabs", "language": "fr", "all": True})
+    assert resp.status_code == 409

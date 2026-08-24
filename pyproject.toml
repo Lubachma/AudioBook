@@ -1,0 +1,33 @@
+[project]
+name = "audiobook"
+version = "2.0.0"
+description = "PDF/EPUB → livre audio avec TTS local (Apple Silicon) ou ElevenLabs"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]",
+    "pdfplumber",
+    "httpx",
+    "python-multipart",
+    "python-dotenv",
+    "numpy",
+]
+
+[project.optional-dependencies]
+# Moteur TTS local qwen3 (Apple Silicon / MLX).
+# NB : le moteur kyutai (moshi-mlx) vit dans un venv séparé `.venv-kyutai`
+# (créé par scripts/install.sh) car moshi-mlx épingle mlx<0.27 alors que
+# mlx-audio exige mlx>=0.31 — incompatibles dans un même environnement.
+local = [
+    "mlx-audio==0.5.0",
+    "huggingface_hub>=1.0",
+]
+dev = [
+    "pytest",
+    "reportlab",
+]
+
+[tool.uv]
+# Projet "virtuel" : uv gère les dépendances sans construire/installer le paquet lui-même
+# (les imports passent par pythonpath=. de pytest.ini et le lancement depuis la racine).
+package = false

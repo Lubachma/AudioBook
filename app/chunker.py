@@ -46,3 +46,21 @@ def chunk_text(text: str, max_chars: int = 4000) -> list[str]:
     if current:
         chunks.append(current)
     return chunks
+
+
+def chunk_by_chapters(text: str, chapters: list, max_chars: int) -> list[tuple[str, int]]:
+    """(chunk, index_de_chapitre) — aucun chunk ne chevauche une frontière de chapitre.
+
+    `chapters` : liste de Chapter{title, offset} triée par offset (voir chapters.py).
+    Liste vide -> tout le livre est le chapitre 0. Le découpage reste déterministe,
+    ce qui garantit la stabilité des indices de chunks entre deux reprises.
+    """
+    if not chapters:
+        return [(chunk, 0) for chunk in chunk_text(text, max_chars)]
+    result: list[tuple[str, int]] = []
+    for idx, chapter in enumerate(chapters):
+        start = chapter.offset
+        end = chapters[idx + 1].offset if idx + 1 < len(chapters) else len(text)
+        for chunk in chunk_text(text[start:end], max_chars):
+            result.append((chunk, idx))
+    return result

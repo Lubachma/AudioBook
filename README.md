@@ -1,117 +1,108 @@
-# PDF → Livre audio
+# 📖 → 🎧 Livres audio — PDF/EPUB vers voix naturelle, en local
 
-Web app privée : on dépose un PDF, il est lu à voix haute (voix naturelle) et devient un MP3 écoutable en streaming ou téléchargeable depuis un téléphone.
+Application familiale : on dépose un **PDF ou un EPUB** depuis n'importe quel appareil
+du réseau Tailscale, le **Mac Studio** le transforme en livre audio avec une voix
+la plus humaine possible, puis on l'écoute dans le navigateur ou on importe le
+**M4B chapitré** dans l'app Livres (iPhone/iPad).
 
-Prévue pour être auto-hébergée sur un Raspberry Pi 5 (Kali Linux) et accessible via Tailscale — rien n'est exposé sur internet.
+La synthèse tourne **entièrement en local** sur Apple Silicon (gratuit, illimité,
+rien ne sort du Mac). ElevenLabs reste disponible en option cloud payante.
 
-## Moteurs de synthèse vocale
+## Moteurs de synthèse
 
-Deux moteurs, choisis **par livre** dans le formulaire :
-
-| Moteur | Coût | Qualité | Notes |
+| Moteur | Où | Voix | Notes |
 |---|---|---|---|
-| **Edge TTS** (défaut) | Gratuit, illimité | Très bonnes voix neurales Microsoft (fr-FR-DeniseNeural, HenriNeural…) | API non officielle : peut casser sans prévenir ; pas de clonage vocal |
-| **ElevenLabs** | Payant au caractère | Top du marché + clonage de votre voix | Nécessite `ELEVENLABS_API_KEY` |
+| `qwen3` *(défaut)* | local (MLX, mlx-audio) | voix françaises **designées** (`data/voices/`) + speakers anglophones | Qwen3-TTS-12Hz-1.7B, Apache 2.0. Le clonage lit avec la voix de référence fabriquée par `scripts/design_voices.py`. |
+| `kyutai` | local (MLX, moshi-mlx, **venv isolé** `.venv-kyutai`) | voix **françaises natives** (Développeuse, Fabien, lecteurs LibriVox) + anglaises | Kyutai TTS 1.6B fr/en, CC-BY-4.0. Tourne dans un worker sous-processus car moshi-mlx exige mlx<0.27 (incompatible mlx-audio). |
+| `elevenlabs` | cloud (payant) | voix du compte | Optionnel : clé API dans `.env`. |
 
-## Fonctionnement
+Le **banc d'essai des voix** dans l'UI génère un même extrait avec chaque voix
+candidate : on écoute, on clique « ⭐ Définir comme voix par défaut », et c'est
+cette voix qui sera présélectionnée pour les prochains livres.
 
-1. Upload d'un PDF via le navigateur → extraction et nettoyage du texte (en-têtes, numéros de page, césures).
-2. **Estimation affichée avant conversion** : gratuit pour Edge TTS, % du quota mensuel pour ElevenLabs.
-3. Clic sur « Convertir » → découpe en chunks ≤ 4000 caractères → synthèse → assemblage ffmpeg en un seul MP3. Reprise sans re-facturation si interrompu.
-4. Écoute dans le navigateur (reprise de position, vitesse de lecture) ou téléchargement.
+## Installation (macOS Apple Silicon)
 
-## Développement local (Mac)
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt   # inclut pytest et reportlab pour les tests
-cp .env.example .env   # remplir ELEVENLABS_API_KEY (optionnel si Edge TTS suffit)
-uvicorn app.main:app --reload
-# http://localhost:8000
-```
-
-Tests :
+Prérequis : [Homebrew](https://brew.sh), `brew install uv ffmpeg`.
 
 ```bash
-pytest
+git clone <repo> && cd AudioBook
+./scripts/install.sh          # venvs + dépendances + modèles (~16 Go, long)
+.venv/bin/python scripts/design_voices.py   # fabrique les narratrices françaises
 ```
 
-L'extraction de texte et la conversion Edge TTS fonctionnent sans clé API ; seule la conversion ElevenLabs consomme des crédits.
-
-## Déploiement sur le Raspberry Pi 5 (Kali Linux)
-
-### 1. Code et dépendances
+Lancement manuel :
 
 ```bash
-# depuis le Mac : rsync -av --exclude .venv --exclude data audio_book/ kali@<ip-du-pi>:~/audiobook/
-sudo apt update && sudo apt install -y ffmpeg python3-venv python3-pip
-cd ~/audiobook
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env && nano .env   # ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID
+.venv/bin/uvicorn app.main:app --port 8000   # http://localhost:8000
 ```
 
-### 2. Service systemd
+### Service au démarrage (launchd)
 
 ```bash
-# adapter User= et WorkingDirectory= dans audiobook.service si besoin
-sudo cp audiobook.service /etc/systemd/system/
-sudo systemctl enable --now audiobook
-journalctl -u audiobook -f   # logs
+./scripts/install_service.sh        # LaunchAgent + caffeinate (pas de veille pendant les jobs)
+./scripts/install_service.sh --remove
 ```
 
-Le service n'écoute **que sur l'IP Tailscale** de la machine (`--host $(tailscale ip -4)`) : il est injoignable depuis le LAN local, et rien n'est exposé sur internet. Tailscale doit donc être installé et connecté **avant** le démarrage du service (section suivante).
+Logs : `~/Library/Logs/audiobook.{out,err}.log`. Un LaunchAgent ne tourne que
+session ouverte → activer l'**ouverture de session automatique** (Réglages >
+Utilisateurs et groupes) sur un Mac qui sert de serveur.
 
-### 3. Tailscale (accès privé depuis le téléphone)
-
-Le script d'install officiel ne détecte pas Kali → installer le dépôt Debian Bookworm à la main :
+### Accès depuis les autres appareils (Tailscale)
 
 ```bash
-curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
-sudo apt update && sudo apt install -y tailscale
-sudo tailscale up
+brew install --cask tailscale-app
+open -a Tailscale          # se connecter au compte Tailscale (une fois)
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 8000
 ```
 
-Sur le téléphone : installer l'app Tailscale, se connecter au même compte (ou inviter le téléphone sur le tailnet via la console admin). Le site est alors joignable à :
+L'app est alors sur `https://<nom-du-mac>.<tailnet>.ts.net` pour tous les
+appareils du tailnet (prérequis dans la console admin Tailscale : MagicDNS et
+HTTPS Certificates activés). Le téléphone qui écoute doit être sur le même
+compte Tailscale, ou la machine doit lui être partagée (fonction « Share »).
+Repli sans HTTPS : servir uvicorn avec `--host $(tailscale ip -4)`.
 
-```
-http://<nom-du-pi>.<tailnet>.ts.net:8000
-```
+## Utilisation
 
-### 4. HTTPS (optionnel)
+1. Ouvrir l'app, choisir le fichier (PDF ou EPUB), le moteur et la voix, puis **Ajouter**.
+2. L'extraction affiche le nombre de caractères (et détecte les chapitres :
+   exacts pour un EPUB, par motifs « Chapitre X / Prologue / … » pour un PDF).
+3. **Convertir en audio** : la synthèse tourne en tâche de fond (progression en
+   temps réel). Un roman entier se génère typiquement en une nuit ; en cas
+   d'interruption, la reprise ne re-synthétise que les segments manquants.
+4. Écoute dans le navigateur (position mémorisée, vitesse réglable), ou
+   téléchargement **MP3** / **M4B chapitré** (à ouvrir dans l'app Livres iOS).
 
-`tailscale serve` peut exposer le service en HTTPS avec un certificat automatique :
+## Migration depuis le Raspberry Pi (optionnel)
 
 ```bash
-sudo tailscale serve --bg 8000
-# -> https://<nom-du-pi>.<tailnet>.ts.net
+./scripts/migrate_from_pi.sh kali@<ip-du-pi> /home/kali/audiobook/data/
 ```
 
-## Coûts ElevenLabs
+Les anciens livres restent lisibles tels quels. Ceux générés avec edge-tts
+(moteur retiré) ne sont plus *re-convertibles* : les re-uploader au besoin.
 
-| Plan | Prix | Caractères/mois | Équivalent |
-|---|---|---|---|
-| Free | 0 $ | 10 000 | tester la voix |
-| Starter | ~5 $/mois | 100 000 | 1-2 livres courts |
-| Creator | ~22 $/mois | 500 000 | un roman de ~300 pages |
+## Développement
 
-L'app affiche l'estimation (caractères + % du quota) avant chaque conversion. Ajuster `MONTHLY_QUOTA_CHARS` dans `.env` selon votre plan. Le texte extrait est conservé : un livre interrompu en cours de mois peut être relancé plus tard sans re-upload.
+```bash
+uv sync --extra local --extra dev
+uv run pytest                    # suite rapide (moteurs mockés)
+uv run pytest -m slow -s         # intégration réelle (modèles locaux, minutes)
+.venv/bin/python scripts/bench_tts.py --engine qwen3 --voice ref:claire   # vitesse/RTF
+```
 
-## Cloner votre voix (étape suivante)
-
-1. Enregistrer 1 à 3 minutes de votre voix (calme, sans bruit de fond, micro correct).
-2. Dashboard ElevenLabs → Voices → *Add a new voice* → *Instant Voice Cloning* (inclus dès le plan Starter).
-3. Copier l'ID de la voix créée dans `.env` → `ELEVENLABS_VOICE_ID=...`
-4. `sudo systemctl restart audiobook`
-
-Aucun changement de code : la voix est un paramètre de configuration.
+Structure : `app/engines/` (interface commune + qwen3/kyutai/elevenlabs),
+`app/audio.py` (assemblage MP3 + M4B chapitré), `app/pdf_extract.py` /
+`app/epub_extract.py` (texte + chapitres), `app/jobs.py` (file séquentielle,
+reprise par chunk avec empreinte `chunks.meta.json`), `app/previews.py`
+(banc d'essai), `app/static/index.html` (UI vanilla).
 
 ## Dépannage
 
-- **« PDF scanné, OCR non supporté »** : le PDF est une image. Le passer d'abord dans un OCR (ex. `ocrmypdf in.pdf out.pdf`) puis re-uploader.
-- **« Quota ElevenLabs atteint »** : quota mensuel consommé ; attendre le renouvellement, monter de plan, ou rebasculer le livre sur Edge TTS (gratuit). Le livre passe en erreur avec un bouton « Réessayer la conversion » — les segments déjà générés ne seront pas re-facturés.
-- **Le site ne répond plus sur le réseau local** : normal, le service n'écoute que sur Tailscale. Vérifier `tailscale status` sur le Pi et sur le téléphone.
-- **Voix qui change de langue** : le modèle `eleven_multilingual_v2` suit le paramètre langue choisi à l'upload (fr/en).
-- **Logs** : `journalctl -u audiobook -f` sur le Pi ; le texte extrait de chaque livre est dans `data/text/<id>.txt`.
+- **« Moteur indisponible »** dans l'UI : la raison est affichée (clé API
+  absente, `.venv-kyutai` manquant → relancer `./scripts/install.sh`).
+- **Kyutai muet ou en erreur** : voir `data/logs/kyutai_worker.log`.
+- **ffmpeg introuvable sous launchd** : le plist fixe le PATH homebrew ; si le
+  service a été installé à la main, vérifier `EnvironmentVariables.PATH`.
+- **Premier livre très lent à démarrer** : chargement du modèle (~10-30 s) et,
+  au tout premier usage, téléchargement des poids dans `~/.cache/huggingface`.
+- **PDF scanné** : pas d'OCR — le livre est refusé avec un message explicite.
