@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
 from .chapters import Chapter
+from .textnorm import normalize
 
 _NS = {
     "cnt": "urn:oasis:names:tc:opendocument:xmlns:container",
@@ -197,6 +198,7 @@ def extract_book(epub_path: str | Path) -> tuple[str, list[Chapter]]:
             except KeyError:
                 continue
             text, heading = _doc_text(html)
+            text = normalize(text)
             if len(text) < MIN_DOC_CHARS:
                 continue
             title = toc.get(doc_path) or heading or f"Chapitre {len(chapters) + 1}"

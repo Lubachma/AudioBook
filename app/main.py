@@ -4,6 +4,7 @@ streaming audio (MP3 + M4B chapitré), UI statique."""
 import shutil
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -14,7 +15,7 @@ from pydantic import BaseModel
 from . import audio, covers, engines, jobs, previews
 from .config import settings
 from .engines import TTSError
-from .settings_store import default_engine_name, default_voice_for, set_setting
+from .settings_store import default_engine_name, default_voice_for, get_setting, set_setting
 
 STATIC_DIR = Path(__file__).parent / "static"
 CHUNK_SIZE = 1 << 20  # 1 Mo
@@ -49,6 +50,8 @@ def get_config() -> dict:
         entry["default_voice"] = (
             default_voice_for(entry["name"]) or engines.get_engine(entry["name"]).default_voice()
         )
+        # Vitesse mesurée lors des dernières conversions (pour les estimations de l'UI).
+        entry["chars_per_min"] = int(get_setting(f"speed_cpm:{entry['name']}") or 0)
     return {
         "default_language": settings.default_language,
         "default_engine": _resolved_default_engine(),
@@ -142,7 +145,9 @@ async def create_book(
 def list_books() -> list[dict]:
     books = jobs.list_jobs()
     for book in books:
-        book["has_m4b"] = book["status"] == "done" and jobs.m4b_path(book["id"]).exists()
+        # Sur l'existence du fichier, pas sur le statut : pendant une reconversion,
+        # la version précédente reste écoutable jusqu'à son remplacement atomique.
+        book["has_m4b"] = jobs.m4b_path(book["id"]).exists()
         book["has_cover"] = covers.cover_path(book["id"]).exists()
     return books
 
@@ -176,16 +181,61 @@ def convert_book(job_id: str) -> dict:
         raise HTTPException(status_code=409, detail=f"Moteur {engine_name} indisponible : {reason}")
     # Statut posé AVANT l'enqueue : un second clic est refusé (409) pendant
     # que le job attend dans la file — sinon il serait converti deux fois.
-    jobs.update_job(job_id, status="converting", error=None)
+    # "queued" tant que le worker n'a pas commencé, "converting" ensuite.
+    jobs.update_job(job_id, status="queued", error=None)
     jobs.enqueue(job_id, "convert")
-    return {"id": job_id, "status": "converting"}
+    return {"id": job_id, "status": "queued"}
+
+
+class ReconvertRequest(BaseModel):
+    engine: str = ""
+    voice_id: str = ""
+
+
+@app.post("/api/books/{job_id}/reconvert")
+def reconvert_book(job_id: str, body: ReconvertRequest) -> dict:
+    """Re-synthétise un livre avec un autre moteur/voix (le texte extrait est réutilisé).
+
+    L'audio actuel reste écoutable pendant la régénération : il n'est remplacé
+    qu'à la fin de l'assemblage."""
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Livre introuvable.")
+    if job["status"] in ("extracting", "queued", "converting"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Reconversion impossible depuis le statut '{job['status']}'.",
+        )
+    if not jobs.text_path(job_id).exists():
+        raise HTTPException(status_code=409, detail="Texte extrait absent, ré-uploadez le fichier.")
+
+    engine_name = body.engine or job["engine"] or _resolved_default_engine()
+    if engine_name not in engines.engine_names():
+        raise HTTPException(status_code=400, detail=f"Moteur inconnu : '{engine_name}'.")
+    available, reason = engines.get_engine(engine_name).availability()
+    if not available:
+        raise HTTPException(status_code=409, detail=f"Moteur {engine_name} indisponible : {reason}")
+
+    voice_id = body.voice_id  # vide = voix par défaut du moteur au moment de la synthèse
+    jobs.update_job(
+        job_id,
+        engine=engine_name,
+        voice_id=voice_id,
+        voice_label=_voice_label(engine_name, voice_id),
+        status="queued",
+        error=None,
+        done_chunks=0,
+        total_chunks=0,
+    )
+    jobs.enqueue(job_id, "convert")
+    return {"id": job_id, "status": "queued"}
 
 
 @app.get("/api/books/{job_id}/audio")
 def get_audio(job_id: str) -> FileResponse:
     job = jobs.get_job(job_id)
     audio = jobs.audio_path(job_id)
-    if job is None or job["status"] != "done" or not audio.exists():
+    if job is None or not audio.exists():
         raise HTTPException(status_code=404, detail="Audio introuvable.")
     return FileResponse(audio, media_type="audio/mpeg")
 
@@ -194,13 +244,13 @@ def get_audio(job_id: str) -> FileResponse:
 def get_audio_m4b(job_id: str) -> FileResponse:
     job = jobs.get_job(job_id)
     m4b = jobs.m4b_path(job_id)
-    if job is None or job["status"] != "done" or not m4b.exists():
+    if job is None or not m4b.exists():
         raise HTTPException(status_code=404, detail="M4B introuvable.")
     return FileResponse(m4b, media_type="audio/mp4", filename=f"{job['title']}.m4b")
 
 
-# Cache des chapitres lus depuis le M4B (les livres terminés sont immuables).
-_chapters_cache: dict[str, list[dict]] = {}
+# Cache des chapitres lus depuis le M4B, invalidé par mtime (reconversion possible).
+_chapters_cache: dict[str, tuple[float, list[dict]]] = {}
 
 
 @app.get("/api/books/{job_id}/chapters")
@@ -209,12 +259,14 @@ def get_chapters(job_id: str) -> dict:
     m4b = jobs.m4b_path(job_id)
     if jobs.get_job(job_id) is None or not m4b.exists():
         return {"chapters": []}
-    if job_id not in _chapters_cache:
+    mtime = m4b.stat().st_mtime
+    cached = _chapters_cache.get(job_id)
+    if cached is None or cached[0] != mtime:
         try:
-            _chapters_cache[job_id] = audio.probe_chapters(m4b)
+            _chapters_cache[job_id] = (mtime, audio.probe_chapters(m4b))
         except audio.AudioError:
             return {"chapters": []}
-    return {"chapters": _chapters_cache[job_id]}
+    return {"chapters": _chapters_cache[job_id][1]}
 
 
 @app.get("/api/books/{job_id}/cover")
@@ -234,7 +286,11 @@ def set_position(job_id: str, body: PositionRequest) -> None:
     """Position de lecture partagée entre appareils (source de vérité serveur)."""
     if jobs.get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Livre introuvable.")
-    jobs.update_job(job_id, position_seconds=max(0.0, float(body.seconds)))
+    jobs.update_job(
+        job_id,
+        position_seconds=max(0.0, float(body.seconds)),
+        last_played_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 @app.delete("/api/books/{job_id}", status_code=204)

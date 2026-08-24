@@ -19,6 +19,7 @@ from pathlib import Path
 import pdfplumber
 
 from .chapters import Chapter
+from .textnorm import normalize
 
 # En dessous de cette moyenne de caractères par page, on considère que le PDF
 # est un scan sans couche texte.
@@ -163,7 +164,6 @@ def _clean_page(lines: list[str], repeated: set[str]) -> str:
 def _join_lines(text: str) -> str:
     # Césure de fin de ligne : "exem-\nple" -> "exemple"
     text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
-    # Sauts de ligne -> espaces, puis normalisation des espaces multiples
+    # Sauts de ligne -> espaces, puis normalisation TTS (espaces, notes, abréviations…)
     text = text.replace("\n", " ")
-    text = re.sub(r"[ \t]+", " ", text)
-    return text.strip()
+    return normalize(text)

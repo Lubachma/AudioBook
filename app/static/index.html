@@ -18,13 +18,13 @@
   .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
   .muted { color: var(--muted); font-size: 0.85rem; }
   form { display: flex; flex-direction: column; gap: 10px; }
-  input[type=file], select, button { font-size: 1rem; padding: 10px; border-radius: 8px; border: 1px solid #333a4a; background: #12151c; color: var(--text); }
+  input[type=file], input[type=search], select, button { font-size: 1rem; padding: 10px; border-radius: 8px; border: 1px solid #333a4a; background: #12151c; color: var(--text); }
   button { cursor: pointer; border: none; }
   .btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
   .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
   .btn-small { font-size: 0.85rem; padding: 6px 10px; }
   .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
-  .badge.extracting, .badge.converting { background: #3a4a6b; color: #cfe0ff; }
+  .badge.extracting, .badge.converting, .badge.queued { background: #3a4a6b; color: #cfe0ff; }
   .badge.extracted { background: #6b5a2a; color: #ffe9a8; }
   .badge.done { background: #24503c; color: #a8f0cd; }
   .badge.error { background: #5a2a2a; color: #ffb3b3; }
@@ -37,12 +37,42 @@
   .cover-box { flex: none; width: 60px; height: 90px; border-radius: 8px; background: #12151c; display: flex; align-items: center; justify-content: center; font-size: 1.6rem; overflow: hidden; }
   .cover-box img { width: 100%; height: 100%; object-fit: cover; }
   .book-info { flex: 1; min-width: 0; }
+
+  /* Reprendre l'écoute */
+  #resume-hero { display: none; background: linear-gradient(135deg, #223055, #1a1e27); cursor: pointer; }
+  #resume-hero .book-head { align-items: center; }
+  #resume-hero .cover-box { width: 72px; height: 108px; }
+  #resume-hero .play-big { flex: none; width: 56px; height: 56px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 1.5rem; display: flex; align-items: center; justify-content: center; }
+
+  /* Barre de progression du lecteur */
+  .strip { margin-top: 10px; cursor: pointer; }
+  .strip .track { position: relative; height: 14px; border-radius: 7px; background: #12151c; overflow: hidden; }
+  .strip .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); opacity: 0.85; }
+  .strip .tick { position: absolute; top: 0; bottom: 0; width: 2px; background: #4a5468; }
+  .strip .times { display: flex; justify-content: space-between; margin-top: 4px; }
+  .timer-note { color: #ffd166; font-size: 0.8rem; }
+
   details.chapters { margin-top: 8px; }
   details.chapters summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; padding: 4px 0; }
   .chapter-row { display: flex; gap: 10px; padding: 6px 6px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
   .chapter-row:hover { background: #232a38; }
   .chapter-row.current { background: #24334f; color: #cfe0ff; }
   .chapter-time { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; min-width: 52px; }
+
+  /* Bibliothèque : recherche, tri, grille */
+  #library-bar { display: none; gap: 8px; margin-bottom: 12px; }
+  #library-bar input[type=search] { flex: 1; min-width: 0; }
+  #books { display: flex; flex-direction: column; }
+  #books-grid { display: none; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 12px; }
+  .tile { cursor: pointer; text-align: center; }
+  .tile .cover-box { width: 100%; height: auto; aspect-ratio: 2/3; margin-bottom: 4px; }
+  .tile .t-title { font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .card.flash { outline: 2px solid var(--accent); }
+
+  /* Zone de dépôt */
+  #upload-card.dragover { outline: 2px dashed var(--accent); outline-offset: -8px; }
+  #upload-progress-box { display: none; }
+
   details.bench summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
   .bench-voice { border-top: 1px solid #262c3a; padding: 10px 0 4px; }
   .bench-voice .name { font-weight: 600; }
@@ -55,17 +85,33 @@
 <body>
 <header><h1>📖 → 🎧 Livres audio</h1><div class="muted" id="engine-info"></div></header>
 <main>
-  <div class="card">
+  <div class="card" id="resume-hero">
+    <div class="book-head">
+      <div class="cover-box" id="hero-cover">📖</div>
+      <div class="book-info">
+        <div class="muted">Continuer l'écoute</div>
+        <div><strong id="hero-title"></strong></div>
+        <div class="muted" id="hero-sub"></div>
+      </div>
+      <div class="play-big">▶</div>
+    </div>
+  </div>
+
+  <div class="card" id="upload-card">
     <form id="upload-form">
-      <input type="file" id="file" accept=".pdf,.epub,application/pdf,application/epub+zip" required>
+      <input type="file" id="file" accept=".pdf,.epub,application/pdf,application/epub+zip" multiple required>
       <select id="engine" title="Moteur de synthèse"></select>
       <select id="voice" title="Voix de lecture"></select>
       <select id="language">
         <option value="fr">Français</option>
         <option value="en">English</option>
       </select>
-      <button type="submit" class="btn-primary">Ajouter le livre (PDF ou EPUB)</button>
+      <button type="submit" class="btn-primary">Ajouter (PDF ou EPUB — dépôt direct possible)</button>
       <div class="muted" id="engine-note"></div>
+      <div id="upload-progress-box">
+        <progress id="upload-progress" max="100" value="0"></progress>
+        <div class="muted" id="upload-label"></div>
+      </div>
     </form>
   </div>
 
@@ -85,13 +131,26 @@
     </details>
   </div>
 
+  <div id="library-bar">
+    <input type="search" id="search" placeholder="Rechercher un livre…">
+    <select id="sort">
+      <option value="recent">Récents</option>
+      <option value="title">Titre A→Z</option>
+      <option value="status">En cours d'abord</option>
+    </select>
+    <button class="btn-small" id="view-toggle" title="Basculer liste/grille">🔳</button>
+  </div>
   <div id="books"></div>
+  <div id="books-grid"></div>
 </main>
 
 <script>
-const STATUS_LABELS = { extracting: "Extraction…", extracted: "Prêt", converting: "Conversion…", done: "Terminé", error: "Erreur" };
+const STATUS_LABELS = { extracting: "Extraction…", extracted: "Prêt", queued: "En attente", converting: "Conversion…", done: "Terminé", error: "Erreur" };
+const READ_SPEED_CHARS_PER_SEC = 15.5; // débit moyen d'un livre audio en français
 const cards = new Map(); // id -> élément DOM, pour ne pas recréer les lecteurs en cours d'écoute
 const voiceNames = new Map(); // voice_id -> nom affichable
+const progressSamples = new Map(); // id -> {t, done, rate} pour l'ETA de conversion
+let latestBooks = [];
 let CONFIG = { engines: [], monthly_quota_chars: 100000, default_engine: "", default_language: "fr" };
 
 function engineByName(name) { return CONFIG.engines.find((e) => e.name === name); }
@@ -109,6 +168,12 @@ function fmtTime(s) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   const mm = String(m).padStart(2, "0"), ss = String(sec).padStart(2, "0");
   return h ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+}
+
+function fmtDurationApprox(seconds) {
+  if (seconds < 3600) return Math.max(1, Math.round(seconds / 60)) + " min";
+  const h = Math.floor(seconds / 3600), m = Math.round((seconds % 3600) / 60);
+  return m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`;
 }
 
 async function loadConfig() {
@@ -149,15 +214,14 @@ function updateEngineNote() {
     : "Moteur local : gratuit et illimité, généré sur le Mac.";
 }
 
-async function loadVoices() {
-  const engineName = document.getElementById("engine").value;
-  const select = document.getElementById("voice");
-  updateEngineNote();
-  select.innerHTML = '<option value="">Chargement des voix…</option>';
+async function fetchVoiceOptions(engineName) {
   const { voices } = await (await fetch("/api/voices?engine=" + engineName)).json();
-  select.innerHTML = "";
   for (const v of voices) voiceNames.set(v.voice_id, v.name);
-  const engine = engineByName(engineName) || {};
+  return voices;
+}
+
+function fillVoiceSelect(select, voices, preferredVoice) {
+  select.innerHTML = "";
   if (voices.length) {
     for (const v of voices) {
       const opt = document.createElement("option");
@@ -165,30 +229,119 @@ async function loadVoices() {
       opt.textContent = v.name + (v.category === "cloned" ? " (clonée)" : "");
       select.appendChild(opt);
     }
-    select.value = voices.some((v) => v.voice_id === engine.default_voice)
-      ? engine.default_voice
-      : voices[0].voice_id;
+    select.value = voices.some((v) => v.voice_id === preferredVoice) ? preferredVoice : voices[0].voice_id;
   } else {
-    const fallback = engine.default_voice || "";
-    voiceNames.set(fallback, "Voix par défaut");
-    select.innerHTML = `<option value="${fallback}">Voix par défaut</option>`;
+    voiceNames.set(preferredVoice || "", "Voix par défaut");
+    select.innerHTML = `<option value="${preferredVoice || ""}">Voix par défaut</option>`;
   }
+}
+
+async function loadVoices() {
+  const engineName = document.getElementById("engine").value;
+  const select = document.getElementById("voice");
+  updateEngineNote();
+  select.innerHTML = '<option value="">Chargement des voix…</option>';
+  const voices = await fetchVoiceOptions(engineName);
+  fillVoiceSelect(select, voices, (engineByName(engineName) || {}).default_voice || "");
+}
+
+// ------------------------------------------------------------ upload (drag & drop, multi, progression)
+
+function uploadOne(file, onProgress) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/books");
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      let detail = "";
+      try { detail = JSON.parse(xhr.responseText).detail || ""; } catch (e) { /* réponse non JSON */ }
+      resolve({ ok: xhr.status < 300, detail });
+    };
+    xhr.onerror = () => resolve({ ok: false, detail: "serveur injoignable" });
+    const data = new FormData();
+    data.append("file", file);
+    data.append("language", document.getElementById("language").value);
+    data.append("voice_id", document.getElementById("voice").value);
+    data.append("engine", document.getElementById("engine").value);
+    xhr.send(data);
+  });
+}
+
+async function uploadFiles(fileList) {
+  const files = [...fileList].filter((f) => /\.(pdf|epub)$/i.test(f.name));
+  const skipped = fileList.length - files.length;
+  if (!files.length) { alert("Aucun fichier PDF ou EPUB dans la sélection."); return; }
+  const box = document.getElementById("upload-progress-box");
+  const bar = document.getElementById("upload-progress");
+  const label = document.getElementById("upload-label");
+  box.style.display = "block";
+  const errors = [];
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const prefix = files.length > 1 ? `${i + 1}/${files.length} · ` : "";
+    const result = await uploadOne(file, (frac) => {
+      bar.value = Math.round(frac * 100);
+      label.textContent = `${prefix}${file.name} · ${Math.round(frac * 100)} %`;
+    });
+    if (!result.ok) errors.push(`${file.name} : ${result.detail || "échec"}`);
+    refresh();
+  }
+  box.style.display = "none";
+  const notes = [];
+  if (skipped) notes.push(`${skipped} fichier(s) ignoré(s) (ni PDF ni EPUB)`);
+  if (errors.length) notes.push(errors.join("\n"));
+  if (notes.length) alert(notes.join("\n"));
 }
 
 document.getElementById("upload-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const fileInput = document.getElementById("file");
   if (!fileInput.files.length) return;
-  const data = new FormData();
-  data.append("file", fileInput.files[0]);
-  data.append("language", document.getElementById("language").value);
-  data.append("voice_id", document.getElementById("voice").value);
-  data.append("engine", document.getElementById("engine").value);
-  const resp = await fetch("/api/books", { method: "POST", body: data });
-  if (!resp.ok) { alert((await resp.json()).detail || "Échec de l'upload"); return; }
+  const files = fileInput.files;
   fileInput.value = "";
-  refresh();
+  await uploadFiles(files);
 });
+
+const uploadCard = document.getElementById("upload-card");
+["dragenter", "dragover"].forEach((evt) => uploadCard.addEventListener(evt, (e) => {
+  e.preventDefault();
+  uploadCard.classList.add("dragover");
+}));
+["dragleave", "drop"].forEach((evt) => uploadCard.addEventListener(evt, (e) => {
+  e.preventDefault();
+  uploadCard.classList.remove("dragover");
+}));
+uploadCard.addEventListener("drop", (e) => {
+  if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files);
+});
+
+// ------------------------------------------------------------ estimations
+
+function bookEngine(book) { return book.engine || CONFIG.default_engine; }
+
+function estimateLine(book) {
+  const audioSec = book.char_count / READ_SPEED_CHARS_PER_SEC;
+  let line = `≈ ${fmtDurationApprox(audioSec)} d'audio`;
+  const cpm = (engineByName(bookEngine(book)) || {}).chars_per_min || 0;
+  if (cpm > 0) line += ` · génération ≈ ${fmtDurationApprox(book.char_count / cpm * 60)}`;
+  return line;
+}
+
+function conversionEta(book) {
+  const now = Date.now();
+  const prev = progressSamples.get(book.id);
+  let entry = prev;
+  if (!prev || book.done_chunks < prev.done) {
+    entry = { t: now, done: book.done_chunks, rate: 0 };
+  } else if (book.done_chunks > prev.done) {
+    const rate = (book.done_chunks - prev.done) / ((now - prev.t) / 1000); // chunks/s
+    entry = { t: now, done: book.done_chunks, rate: prev.rate ? prev.rate * 0.6 + rate * 0.4 : rate };
+  }
+  progressSamples.set(book.id, entry);
+  if (!entry.rate || !book.total_chunks) return "";
+  const remaining = (book.total_chunks - book.done_chunks) / entry.rate;
+  return remaining > 5 ? ` · reste ≈ ${fmtDurationApprox(remaining)}` : "";
+}
 
 function formatChars(book) {
   const chars = book.char_count.toLocaleString("fr-FR") + " caractères";
@@ -224,6 +377,7 @@ function buildPlayer(body, book) {
   audio.controls = true;
   audio.preload = "metadata";
   audio.src = `/api/books/${book.id}/audio`;
+  body.dataset.hasPlayer = "1";
 
   // Position : le serveur fait foi (multi-appareils), localStorage en secours.
   const posKey = "pos_" + book.id;
@@ -232,6 +386,9 @@ function buildPlayer(body, book) {
     : (parseFloat(localStorage.getItem(posKey)) || 0);
   audio.addEventListener("loadedmetadata", () => {
     if (startPos > 0 && startPos < audio.duration - 10) audio.currentTime = startPos;
+    buildTicks();
+    updateStrip();
+    renderHero();
   });
   let lastSync = 0;
   const syncPosition = (force) => {
@@ -270,8 +427,41 @@ function buildPlayer(body, book) {
     const target = chapters[Math.max(0, Math.min(chapters.length - 1, currentChapterIndex() + dir))];
     if (target) audio.currentTime = target.start;
   };
+
+  // Barre de progression avec graduations de chapitres
+  const strip = document.createElement("div");
+  strip.className = "strip";
+  strip.innerHTML = `<div class="track"><div class="fill"></div></div>
+    <div class="times muted"><span class="t-elapsed">0:00</span><span class="t-chapter"></span><span class="t-remaining"></span></div>`;
+  const track = strip.querySelector(".track");
+  const buildTicks = () => {
+    if (!isFinite(audio.duration) || audio.duration <= 0) return;
+    track.querySelectorAll(".tick").forEach((t) => t.remove());
+    for (const ch of chapters.slice(1)) {
+      const tick = document.createElement("div");
+      tick.className = "tick";
+      tick.style.left = (ch.start / audio.duration * 100) + "%";
+      track.appendChild(tick);
+    }
+  };
+  const updateStrip = () => {
+    if (!isFinite(audio.duration) || audio.duration <= 0) return;
+    strip.querySelector(".fill").style.width = (audio.currentTime / audio.duration * 100) + "%";
+    strip.querySelector(".t-elapsed").textContent = fmtTime(audio.currentTime);
+    strip.querySelector(".t-remaining").textContent = "reste " + fmtTime(audio.duration - audio.currentTime);
+    const idx = currentChapterIndex();
+    strip.querySelector(".t-chapter").textContent =
+      chapters.length > 1 && idx >= 0 ? `ch. ${idx + 1}/${chapters.length}` : "";
+  };
+  track.addEventListener("click", (e) => {
+    if (!isFinite(audio.duration)) return;
+    const rect = track.getBoundingClientRect();
+    audio.currentTime = (e.clientX - rect.left) / rect.width * audio.duration;
+  });
+
   fetch(`/api/books/${book.id}/chapters`).then((r) => r.json()).then((data) => {
     chapters = data.chapters || [];
+    buildTicks();
     if (chapters.length < 2) return;
     const summary = document.createElement("summary");
     summary.textContent = `Chapitres (${chapters.length})`;
@@ -290,6 +480,45 @@ function buildPlayer(body, book) {
       return row;
     });
   }).catch(() => {});
+
+  // Minuterie de sommeil
+  let sleepDeadline = null;      // timestamp ms
+  let sleepChapterStart = null;  // index de chapitre au moment de l'activation
+  const timerNote = document.createElement("span");
+  timerNote.className = "timer-note";
+  const sleepSelect = document.createElement("select");
+  sleepSelect.className = "btn-small";
+  sleepSelect.title = "Minuterie de sommeil";
+  for (const [value, label] of [["off", "🌙 off"], ["15", "🌙 15 min"], ["30", "🌙 30 min"], ["45", "🌙 45 min"], ["60", "🌙 60 min"], ["chapter", "🌙 fin du chapitre"]]) {
+    const opt = document.createElement("option");
+    opt.value = value; opt.textContent = label;
+    sleepSelect.appendChild(opt);
+  }
+  const resetSleep = () => {
+    sleepDeadline = null; sleepChapterStart = null;
+    sleepSelect.value = "off"; timerNote.textContent = "";
+  };
+  sleepSelect.onchange = () => {
+    if (sleepSelect.value === "off") { resetSleep(); return; }
+    if (sleepSelect.value === "chapter") {
+      sleepDeadline = null;
+      sleepChapterStart = currentChapterIndex();
+      timerNote.textContent = "jusqu'à la fin du chapitre";
+    } else {
+      sleepChapterStart = null;
+      sleepDeadline = Date.now() + parseInt(sleepSelect.value, 10) * 60000;
+    }
+  };
+  const checkSleep = () => {
+    if (sleepDeadline !== null) {
+      const left = sleepDeadline - Date.now();
+      if (left <= 0) { audio.pause(); resetSleep(); return; }
+      timerNote.textContent = fmtDurationApprox(left / 1000);
+    } else if (sleepChapterStart !== null && currentChapterIndex() > sleepChapterStart) {
+      audio.pause();
+      resetSleep();
+    }
+  };
 
   // Écran verrouillé / commandes système (Android & iOS)
   const setupMediaSession = () => {
@@ -330,14 +559,17 @@ function buildPlayer(body, book) {
   audio.addEventListener("timeupdate", () => {
     if (!audio.paused) syncPosition(false);
     updateChapterHighlight();
+    updateStrip();
     updatePositionState();
+    checkSleep();
   });
   audio.addEventListener("pause", () => syncPosition(true));
-  audio.addEventListener("ended", () => { localStorage.removeItem(posKey); syncPosition(true); });
+  audio.addEventListener("ended", () => { localStorage.removeItem(posKey); syncPosition(true); resetSleep(); });
 
   const row = document.createElement("div");
   row.className = "row";
   const speed = document.createElement("select");
+  speed.className = "btn-small";
   for (const v of [0.75, 1, 1.25, 1.5, 2]) {
     const opt = document.createElement("option");
     opt.value = v; opt.textContent = "×" + v;
@@ -347,14 +579,62 @@ function buildPlayer(body, book) {
   speed.onchange = () => audio.playbackRate = parseFloat(speed.value);
   const dl = document.createElement("a");
   dl.href = audio.src; dl.download = book.title + ".mp3"; dl.textContent = "MP3";
-  row.append(mkBtn("⏪ 30 s", () => seekBy(-30)), mkBtn("30 s ⏩", () => seekBy(30)), speed, dl);
+  row.append(mkBtn("⏪ 30 s", () => seekBy(-30)), mkBtn("30 s ⏩", () => seekBy(30)), speed, sleepSelect, timerNote, dl);
   if (book.has_m4b) {
     const m4b = document.createElement("a");
     m4b.href = `/api/books/${book.id}/audio.m4b`;
-    m4b.textContent = "M4B (chapitres, app Livres)";
+    m4b.textContent = "M4B";
+    m4b.title = "Livre audio chapitré avec pochette (app Livres)";
     row.append(m4b);
   }
-  body.append(audio, row, chapDetails);
+  body.append(audio, strip, row, chapDetails);
+}
+
+// ------------------------------------------------------------ reconversion
+
+function buildReconvertPanel(body, book) {
+  const holder = document.createElement("div");
+  const trigger = mkBtn("🔁 Autre voix", async () => {
+    trigger.style.display = "none";
+    const panel = document.createElement("div");
+    panel.className = "row";
+    const engineSel = document.createElement("select");
+    engineSel.className = "btn-small";
+    for (const eng of CONFIG.engines.filter((e) => e.available)) {
+      const opt = document.createElement("option");
+      opt.value = eng.name;
+      opt.textContent = eng.label.split(" (")[0];
+      engineSel.appendChild(opt);
+    }
+    if ([...engineSel.options].some((o) => o.value === bookEngine(book))) engineSel.value = bookEngine(book);
+    const voiceSel = document.createElement("select");
+    voiceSel.className = "btn-small";
+    const loadPanelVoices = async () => {
+      voiceSel.innerHTML = "<option>…</option>";
+      const voices = await fetchVoiceOptions(engineSel.value);
+      const preferred = engineSel.value === bookEngine(book) && book.voice_id
+        ? book.voice_id
+        : (engineByName(engineSel.value) || {}).default_voice || "";
+      fillVoiceSelect(voiceSel, voices, preferred);
+    };
+    engineSel.onchange = loadPanelVoices;
+    await loadPanelVoices();
+    const go = mkBtn("Lancer", async () => {
+      go.disabled = true;
+      const resp = await fetch(`/api/books/${book.id}/reconvert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ engine: engineSel.value, voice_id: voiceSel.value }),
+      });
+      if (!resp.ok) { alert((await resp.json()).detail || "Échec"); go.disabled = false; return; }
+      refresh();
+    }, "btn-primary btn-small");
+    const cancel = mkBtn("Annuler", () => { panel.remove(); trigger.style.display = ""; });
+    panel.append(engineSel, voiceSel, go, cancel);
+    holder.appendChild(panel);
+  });
+  holder.appendChild(trigger);
+  body.appendChild(holder);
 }
 
 function updateCard(book) {
@@ -404,19 +684,25 @@ function updateCard(book) {
   if (book.status === "extracted") {
     const note = document.createElement("div");
     note.className = "muted";
-    note.textContent = "Vérifiez l'estimation ci-dessus, puis lancez la conversion.";
+    note.textContent = estimateLine(book);
     body.append(note, makeConvertBtn("Convertir en audio"));
+  } else if (book.status === "queued") {
+    const note = document.createElement("div");
+    note.className = "muted";
+    note.textContent = "Dans la file d'attente — la synthèse démarre dès que le Mac est libre.";
+    body.append(note);
   } else if (book.status === "converting") {
     const bar = document.createElement("progress");
     bar.max = book.total_chunks || 1;
     bar.value = book.done_chunks;
     const label = document.createElement("div");
     label.className = "muted";
-    label.textContent = `${book.done_chunks} / ${book.total_chunks} segments`;
+    label.textContent = `${book.done_chunks} / ${book.total_chunks} segments${conversionEta(book)}`;
     body.append(bar, label);
   } else if (book.status === "done") {
     body.dataset.ready = "1";
     buildPlayer(body, book);
+    buildReconvertPanel(body.querySelector(".row"), book);
   } else if (book.status === "error") {
     const msg = document.createElement("div");
     msg.className = "warn";
@@ -424,15 +710,18 @@ function updateCard(book) {
     body.appendChild(msg);
     // Reprise possible si le texte a été extrait (les segments déjà générés
     // ne sont pas re-générés)
-    if (book.char_count > 0) body.appendChild(makeConvertBtn("Réessayer la conversion"));
+    if (book.char_count > 0) {
+      body.appendChild(makeConvertBtn("Réessayer la conversion"));
+      buildReconvertPanel(body, book);
+    }
   }
 
   // Bouton supprimer toujours disponible (sauf pendant conversion)
-  if (book.status !== "converting") {
+  if (book.status !== "converting" && book.status !== "queued") {
     const row = body.querySelector(".row") || (() => { const r = document.createElement("div"); r.className = "row"; body.appendChild(r); return r; })();
     if (!row.querySelector(".btn-danger")) {
       const del = document.createElement("button");
-      del.className = "btn-danger";
+      del.className = "btn-danger btn-small";
       del.textContent = "Supprimer";
       del.onclick = async () => {
         if (!confirm("Supprimer « " + book.title + " » ?")) return;
@@ -444,6 +733,124 @@ function updateCard(book) {
       row.appendChild(del);
     }
   }
+}
+
+// ------------------------------------------------------------ bibliothèque (recherche, tri, grille)
+
+let viewMode = localStorage.getItem("view") || "list";
+const STATUS_ORDER = { converting: 0, queued: 1, extracting: 2, extracted: 3, error: 4, done: 5 };
+
+function sortedFilteredBooks() {
+  const q = (document.getElementById("search").value || "").toLowerCase();
+  let list = latestBooks.filter((b) => !q || b.title.toLowerCase().includes(q));
+  const mode = document.getElementById("sort").value;
+  if (mode === "title") list = [...list].sort((a, b) => a.title.localeCompare(b.title, "fr"));
+  else if (mode === "status") list = [...list].sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9));
+  return list; // "recent" : ordre serveur (created_at desc)
+}
+
+function renderLibrary() {
+  const bar = document.getElementById("library-bar");
+  bar.style.display = latestBooks.length >= 5 ? "flex" : "none";
+  if (latestBooks.length < 5) { document.getElementById("search").value = ""; viewMode = "list"; }
+
+  const list = sortedFilteredBooks();
+  const booksEl = document.getElementById("books");
+  const gridEl = document.getElementById("books-grid");
+  document.getElementById("view-toggle").textContent = viewMode === "list" ? "🔳" : "📋";
+
+  // Tri/filtre par CSS order + display : aucun déplacement DOM,
+  // la lecture audio en cours n'est jamais interrompue.
+  const orderOf = new Map(list.map((b, i) => [b.id, i]));
+  for (const [id, card] of cards) {
+    const order = orderOf.get(id);
+    card.style.display = (order === undefined || viewMode === "grid") ? "none" : "";
+    if (order !== undefined) card.style.order = order;
+  }
+
+  gridEl.style.display = viewMode === "grid" ? "grid" : "none";
+  if (viewMode === "grid") {
+    gridEl.innerHTML = "";
+    for (const book of list) {
+      const tile = document.createElement("div");
+      tile.className = "tile";
+      const cover = document.createElement("div");
+      cover.className = "cover-box";
+      if (book.has_cover) {
+        const img = document.createElement("img");
+        img.src = `/api/books/${book.id}/cover`;
+        cover.appendChild(img);
+      } else cover.textContent = "📖";
+      const title = document.createElement("div");
+      title.className = "t-title";
+      title.textContent = book.title;
+      const badge = document.createElement("span");
+      badge.className = "badge " + book.status;
+      badge.textContent = STATUS_LABELS[book.status] || book.status;
+      tile.append(cover, title, badge);
+      tile.onclick = () => {
+        viewMode = "list";
+        localStorage.setItem("view", viewMode);
+        renderLibrary();
+        const card = cards.get(book.id);
+        if (card) {
+          card.scrollIntoView({ behavior: "smooth", block: "center" });
+          card.classList.add("flash");
+          setTimeout(() => card.classList.remove("flash"), 1500);
+        }
+      };
+      gridEl.appendChild(tile);
+    }
+  }
+}
+
+document.getElementById("view-toggle").addEventListener("click", () => {
+  viewMode = viewMode === "list" ? "grid" : "list";
+  localStorage.setItem("view", viewMode);
+  renderLibrary();
+});
+document.getElementById("search").addEventListener("input", renderLibrary);
+document.getElementById("sort").addEventListener("change", () => {
+  localStorage.setItem("sort", document.getElementById("sort").value);
+  renderLibrary();
+});
+document.getElementById("sort").value = localStorage.getItem("sort") || "recent";
+
+// ------------------------------------------------------------ reprendre l'écoute
+
+function renderHero() {
+  const hero = document.getElementById("resume-hero");
+  const candidates = latestBooks
+    .filter((b) => b.status === "done" && b.last_played_at && b.position_seconds > 5)
+    .sort((a, b) => b.last_played_at.localeCompare(a.last_played_at));
+  const book = candidates[0];
+  if (!book) { hero.style.display = "none"; return; }
+
+  const cover = document.getElementById("hero-cover");
+  if (book.has_cover) {
+    if (!cover.querySelector("img") || cover.dataset.id !== book.id) {
+      cover.textContent = "";
+      cover.innerHTML = `<img src="/api/books/${book.id}/cover" alt="">`;
+    }
+  } else { cover.innerHTML = ""; cover.textContent = "📖"; }
+  cover.dataset.id = book.id;
+  document.getElementById("hero-title").textContent = book.title;
+
+  const cardAudio = cards.get(book.id)?.querySelector("audio");
+  let sub = "repris à " + fmtTime(book.position_seconds);
+  if (cardAudio && isFinite(cardAudio.duration) && cardAudio.duration > 0) {
+    sub += ` · reste ${fmtDurationApprox(cardAudio.duration - book.position_seconds)}`;
+  }
+  document.getElementById("hero-sub").textContent = sub;
+
+  hero.style.display = "block";
+  hero.onclick = () => {
+    const card = cards.get(book.id);
+    const audio = card?.querySelector("audio");
+    if (!audio) return;
+    audio.play();
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 }
 
 // ------------------------------------------------------------ banc d'essai
@@ -553,9 +960,12 @@ bench.addEventListener("toggle", refreshBench);
 async function refresh() {
   try {
     const books = await (await fetch("/api/books")).json();
+    latestBooks = books;
     const seen = new Set();
     for (const book of books) { seen.add(book.id); updateCard(book); }
     for (const [id, card] of cards) if (!seen.has(id)) { card.remove(); cards.delete(id); }
+    renderLibrary();
+    renderHero();
   } catch (e) { /* serveur injoignable : on réessaiera au prochain tick */ }
   try { await refreshBench(); } catch (e) { /* idem */ }
 }

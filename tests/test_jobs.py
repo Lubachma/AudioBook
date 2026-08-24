@@ -31,12 +31,12 @@ def _make_book(engine="fake", text="Première phrase. Deuxième phrase."):
     return job_id
 
 
-def _seed_valid_meta(job_id, engine_name="fake"):
+def _seed_valid_meta(job_id, engine_name="fake", voice_id="fv1"):
     """chunks.meta.json cohérent avec l'état courant (comme une vraie 1re tentative)."""
     engine = engines.get_engine(engine_name)
     text = jobs.text_path(job_id).read_text(encoding="utf-8")
     job = jobs.get_job(job_id)
-    fingerprint = jobs._fingerprint(engine, text, [Chapter(title=job["title"], offset=0)])
+    fingerprint = jobs._fingerprint(engine, text, [Chapter(title=job["title"], offset=0)], voice_id)
     directory = jobs.chunk_dir(job_id)
     directory.mkdir(parents=True, exist_ok=True)
     jobs.write_chunks_meta(directory, engine, 2, fingerprint)
@@ -54,6 +54,21 @@ def test_run_conversion_skips_existing_chunks(data_dir, fake_engine, monkeypatch
 
     assert len(fake_engine.calls) == 1, f"chunk existant re-synthétisé : {fake_engine.calls}"
     assert jobs.get_job(job_id)["status"] == "done"
+
+
+def test_voice_change_purges_chunks(data_dir, fake_engine, monkeypatch):
+    """Changer de voix invalide les chunks existants (l'empreinte inclut la voix) :
+    la reprise ne doit jamais mélanger deux voix dans un même livre."""
+    monkeypatch.setattr(FakeEngine, "chunk_max_chars", 20)  # 2 chunks
+    job_id = _make_book()
+    directory = _seed_valid_meta(job_id, voice_id="fv1")  # 1re tentative avec fv1
+    (directory / "chunk_0001.mp3").write_bytes(b"VOIX FV1")
+    jobs.update_job(job_id, voice_id="fv2")  # reconversion demandée avec fv2
+
+    jobs.run_conversion(job_id)
+
+    assert len(fake_engine.calls) == 2  # tout re-synthétisé avec la nouvelle voix
+    assert all(c["voice_id"] == "fv2" for c in fake_engine.calls)
 
 
 def test_stale_chunks_are_purged(data_dir, fake_engine, monkeypatch):
@@ -234,6 +249,35 @@ def test_recover_interrupted_reenqueues_extractions(data_dir, monkeypatch):
 
     assert jobs.get_job(job_id)["status"] == "extracting"  # pas d'erreur "ré-uploadez"
     assert (job_id, "extract") in enqueued
+
+
+def test_recover_interrupted_resumes_conversions_automatically(data_dir, monkeypatch):
+    """Un redémarrage en pleine conversion (ou en file) relance sans clic :
+    les chunks déjà synthétisés seront réutilisés par la reprise."""
+    converting = _make_book()
+    jobs.update_job(converting, status="converting")
+    queued = _make_book()
+    jobs.update_job(queued, status="queued")
+
+    enqueued = []
+    monkeypatch.setattr(jobs, "enqueue", lambda jid, action: enqueued.append((jid, action)))
+
+    jobs.recover_interrupted()
+
+    assert jobs.get_job(converting)["status"] == "queued"
+    assert (converting, "convert") in enqueued
+    assert (queued, "convert") in enqueued
+
+
+def test_record_speed_ignores_insignificant_measures(data_dir):
+    from app.settings_store import get_setting
+
+    jobs._record_speed("fake", chars=500, seconds=100)     # trop peu de texte
+    jobs._record_speed("fake", chars=50_000, seconds=5)    # reprise quasi instantanée
+    assert get_setting("speed_cpm:fake") is None
+
+    jobs._record_speed("fake", chars=60_000, seconds=1800)  # 2000 car./min
+    assert get_setting("speed_cpm:fake") == "2000"
 
 
 # --------------------------------------------------------- contrôle qualité

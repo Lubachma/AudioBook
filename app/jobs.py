@@ -1,8 +1,9 @@
 """Suivi des jobs de conversion (SQLite) et worker de traitement en tâche de fond.
 
 Cycle de vie d'un job :
-  extracting  -> extraction du texte du PDF/EPUB (+ chapitres)
+  extracting  -> extraction du texte du PDF/EPUB (+ chapitres, couverture)
   extracted   -> texte prêt, estimation affichée, attente du clic "Convertir"
+  queued      -> conversion demandée, en attente derrière un autre livre
   converting  -> synthèse TTS chunk par chunk + assemblage ffmpeg (MP3 + M4B)
   done        -> audio disponible
   error       -> message d'erreur consultable dans l'UI
@@ -19,6 +20,7 @@ import queue
 import shutil
 import sqlite3
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -28,7 +30,7 @@ from . import audio, covers, engines, epub_extract, pdf_extract, previews, qc
 from .chapters import Chapter, load_chapters, save_chapters
 from .chunker import chunk_by_chapters
 from .config import settings
-from .settings_store import default_voice_for, default_engine_name
+from .settings_store import default_voice_for, default_engine_name, set_setting
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -45,7 +47,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     engine TEXT NOT NULL DEFAULT 'elevenlabs',
     voice_label TEXT NOT NULL DEFAULT '',
     source_type TEXT NOT NULL DEFAULT 'pdf',
-    position_seconds REAL NOT NULL DEFAULT 0
+    position_seconds REAL NOT NULL DEFAULT 0,
+    last_played_at TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -58,6 +61,7 @@ MIGRATIONS = (
     "voice_label TEXT NOT NULL DEFAULT ''",
     "source_type TEXT NOT NULL DEFAULT 'pdf'",
     "position_seconds REAL NOT NULL DEFAULT 0",
+    "last_played_at TEXT NOT NULL DEFAULT ''",
 )
 
 # File FIFO consommée par le thread worker ; items :
@@ -155,11 +159,16 @@ def delete_job(job_id: str) -> bool:
 
 
 def recover_interrupted() -> None:
-    """Au redémarrage : conversions interrompues relançables, extractions relancées."""
+    """Au redémarrage : conversions et extractions interrompues relancées d'office.
+
+    Les chunks déjà synthétisés sont réutilisés (reprise) : aucun clic requis."""
     with _connect() as conn:
         conn.execute(
-            "UPDATE jobs SET status = 'extracted' WHERE status = 'converting'"
+            "UPDATE jobs SET status = 'queued' WHERE status IN ('converting', 'queued')"
         )
+        to_convert = conn.execute(
+            "SELECT id FROM jobs WHERE status = 'queued'"
+        ).fetchall()
         extracting = conn.execute(
             "SELECT id FROM jobs WHERE status = 'extracting'"
         ).fetchall()
@@ -167,6 +176,8 @@ def recover_interrupted() -> None:
     # de demander un re-upload (qui orphelinait l'ancien fichier).
     for row in extracting:
         enqueue(row["id"], "extract")
+    for row in to_convert:
+        enqueue(row["id"], "convert")
 
 
 # ---------------------------------------------------------------- chemins
@@ -277,10 +288,13 @@ def run_extraction(job_id: str) -> None:
     update_job(job_id, status="extracted", char_count=len(text), error=None)
 
 
-def _fingerprint(engine: engines.Engine, text: str, chapters: list[Chapter]) -> str:
-    """Empreinte du plan de découpage : moteur, paramètres, texte et chapitres."""
+def _fingerprint(engine: engines.Engine, text: str, chapters: list[Chapter], voice_id: str) -> str:
+    """Empreinte du plan de synthèse : moteur, voix, paramètres, texte et chapitres.
+
+    La voix en fait partie : reprendre un livre après un changement de voix ne doit
+    jamais mélanger des chunks de deux voix différentes."""
     h = hashlib.sha1()
-    h.update(f"{engine.name}|{engine.chunk_ext}|{engine.chunk_max_chars}|".encode())
+    h.update(f"{engine.name}|{engine.chunk_ext}|{engine.chunk_max_chars}|{voice_id}|".encode())
     h.update(hashlib.sha1(text.encode("utf-8")).digest())
     h.update(json.dumps([[c.title, c.offset] for c in chapters]).encode())
     return h.hexdigest()
@@ -349,26 +363,33 @@ def run_conversion(job_id: str) -> None:
         update_job(job_id, status="error", error="Aucun texte à convertir.")
         return
 
-    out_dir = chunk_dir(job_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fingerprint = _fingerprint(engine, text, chapters)
-    _purge_if_stale(out_dir, fingerprint)
-    write_chunks_meta(out_dir, engine, len(chunks), fingerprint)
-
     voice_id = job["voice_id"] or default_voice_for(engine_name) or engine.default_voice()
     language = job["language"] or settings.default_language
     use_qc = engine.is_local and settings.qc_enabled and qc.available()
+
+    out_dir = chunk_dir(job_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fingerprint = _fingerprint(engine, text, chapters, voice_id)
+    _purge_if_stale(out_dir, fingerprint)
+    write_chunks_meta(out_dir, engine, len(chunks), fingerprint)
+
     update_job(job_id, status="converting", total_chunks=len(chunks), done_chunks=0, error=None)
 
     engines.activate(engine_name)
+    synth_chars = 0
+    synth_seconds = 0.0
     for i, (chunk, _chapter_idx) in enumerate(chunks, start=1):
         chunk_file = out_dir / f"chunk_{i:04d}.{engine.chunk_ext}"
         # Un chunk déjà présent (tentative précédente interrompue) n'est pas
         # re-synthétisé : la reprise ne re-facture/re-calcule pas le moteur TTS.
         if not (chunk_file.exists() and chunk_file.stat().st_size > 0):
+            began = time.monotonic()
             _synthesize_checked(engine, chunk, chunk_file, voice_id=voice_id,
                                 language=language, use_qc=use_qc)
+            synth_seconds += time.monotonic() - began
+            synth_chars += len(chunk)
         update_job(job_id, done_chunks=i)
+    _record_speed(engine_name, synth_chars, synth_seconds)
 
     cover = covers.cover_path(job_id)
     audio.merge_book(
@@ -384,6 +405,19 @@ def run_conversion(job_id: str) -> None:
     )
     shutil.rmtree(out_dir)
     update_job(job_id, status="done")
+
+
+def _record_speed(engine_name: str, chars: int, seconds: float) -> None:
+    """Mémorise la vitesse mesurée (caractères/min) pour les estimations de l'UI.
+
+    Seules les mesures significatives comptent (assez de texte et de temps réel),
+    ce qui écarte les reprises quasi instantanées et les petits tests."""
+    if chars < 2000 or seconds < 30:
+        return
+    try:
+        set_setting(f"speed_cpm:{engine_name}", str(round(chars / seconds * 60)))
+    except Exception:  # noqa: BLE001 - statistique non critique
+        traceback.print_exc()
 
 
 def _synthesize_checked(

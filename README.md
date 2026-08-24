@@ -63,21 +63,30 @@ Repli sans HTTPS : servir uvicorn avec `--host $(tailscale ip -4)`.
 
 ## Utilisation
 
-1. Ouvrir l'app, choisir le fichier (PDF ou EPUB), le moteur et la voix, puis **Ajouter**.
-2. L'extraction affiche le nombre de caractères, récupère la **couverture**
-   (jaquette EPUB ou 1re page du PDF) et détecte les chapitres (exacts pour un
-   EPUB, par motifs « Chapitre X / Prologue / … » pour un PDF).
-3. **Convertir en audio** : la synthèse tourne en tâche de fond (progression en
-   temps réel). Un roman entier se génère typiquement en une nuit ; en cas
-   d'interruption, la reprise ne re-synthétise que les segments manquants.
-   Chaque segment local passe un **contrôle qualité** (transcription whisper
-   comparée au texte : un segment suspect est re-synthétisé automatiquement),
-   puis l'assemblage normalise le volume (**loudnorm**) et insère une courte
-   pause entre les chapitres.
-4. Écoute dans le navigateur : **position synchronisée entre appareils**,
-   sauts de **±30 s**, **liste des chapitres cliquable**, vitesse réglable, et
+1. Ajouter un livre : PDF ou EPUB, par le sélecteur ou en **glisser-déposer**
+   (plusieurs fichiers d'un coup, progression d'upload affichée).
+2. L'extraction **normalise le texte pour la voix** (notes de bas de page
+   collées, « M. Dupont » → « Monsieur Dupont », « Chapitre IV » → « 4 »…),
+   récupère la **couverture** (jaquette EPUB ou 1re page du PDF) et détecte les
+   chapitres (exacts pour un EPUB, par motifs pour un PDF). L'estimation
+   affiche la durée d'audio et le temps de génération attendus.
+3. **Convertir en audio** : file d'attente visible (« En attente »), progression
+   et **temps restant estimé**. Un roman entier se génère typiquement en une
+   nuit ; une interruption ou un redémarrage du Mac **reprend tout seul** sans
+   re-synthétiser les segments déjà faits. Chaque segment local passe un
+   **contrôle qualité** (transcription whisper comparée au texte : segment
+   suspect → seconde prise), puis l'assemblage normalise le volume
+   (**loudnorm**) et insère une courte pause entre les chapitres.
+4. Écoute dans le navigateur : carte **« Continuer l'écoute »** en tête de page,
+   **position synchronisée entre appareils**, barre de progression avec
+   **graduations de chapitres**, sauts de **±30 s**, **minuterie de sommeil**
+   (15-60 min ou fin du chapitre), liste des chapitres cliquable, vitesse, et
    commandes sur l'**écran verrouillé** (Media Session, avec la couverture).
-   Ou téléchargement **MP3** / **M4B chapitré avec pochette** (app Livres iOS).
+   Téléchargements **MP3** / **M4B chapitré avec pochette** (app Livres iOS).
+5. **🔁 Autre voix** sur un livre terminé : re-synthèse avec un autre
+   moteur/voix sans ré-upload — l'ancien audio reste écoutable pendant la
+   régénération. La bibliothèque offre recherche, tri et vue grille des
+   couvertures dès qu'elle grandit.
 
 L'app est une **PWA** : sur Android (Chrome ⋮ → « Installer l'application »)
 ou iOS (Partager → « Sur l'écran d'accueil »), elle s'installe comme une

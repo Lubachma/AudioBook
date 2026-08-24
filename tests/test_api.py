@@ -239,8 +239,8 @@ def test_upload_with_removed_edge_engine_rejected(client, tmp_path):
     assert resp.status_code == 400
 
 
-def test_convert_sets_converting_status_before_enqueue(client, monkeypatch):
-    """Le statut transitoire empêche un second clic de re-facturer le livre."""
+def test_convert_sets_queued_status_before_enqueue(client, monkeypatch):
+    """Le statut transitoire « queued » empêche un second clic de doubler le livre."""
     job_id = jobs.create_job(title="livre", language="fr", engine="fake")
     jobs.text_path(job_id).write_text("Du texte.", encoding="utf-8")
     jobs.update_job(job_id, status="extracted", char_count=9)
@@ -250,12 +250,49 @@ def test_convert_sets_converting_status_before_enqueue(client, monkeypatch):
 
     resp = client.post(f"/api/books/{job_id}/convert")
     assert resp.status_code == 200
-    assert jobs.get_job(job_id)["status"] == "converting"  # posé avant même l'exécution
+    assert resp.json()["status"] == "queued"
+    assert jobs.get_job(job_id)["status"] == "queued"  # posé avant même l'exécution
     assert queued == [(job_id, "convert")]
 
     # Un second clic pendant que le job attend dans la file est refusé
     resp2 = client.post(f"/api/books/{job_id}/convert")
     assert resp2.status_code == 409
+
+
+def test_reconvert_with_new_voice(client, tmp_path, monkeypatch):
+    """Un livre terminé peut être re-synthétisé avec un autre moteur/voix,
+    sans ré-upload : le texte extrait est réutilisé."""
+    pdf = _make_pdf(tmp_path / "livre9.pdf")
+    with pdf.open("rb") as f:
+        job_id = client.post(
+            "/api/books", files={"file": ("livre9.pdf", f, "application/pdf")},
+            data={"language": "fr", "engine": "fake", "voice_id": "fv1"},
+        ).json()["id"]
+    client.post(f"/api/books/{job_id}/convert")
+    assert jobs.get_job(job_id)["status"] == "done"
+
+    resp = client.post(f"/api/books/{job_id}/reconvert", json={"engine": "fake", "voice_id": "fv2"})
+    assert resp.status_code == 200
+    job = jobs.get_job(job_id)
+    assert job["status"] == "done"  # enqueue synchrone en test : reconverti dans la foulée
+    assert job["voice_id"] == "fv2"
+    assert job["voice_label"] == "Fake voice"
+
+
+def test_reconvert_rejected_while_converting(client):
+    job_id = jobs.create_job(title="livre", language="fr", engine="fake")
+    jobs.text_path(job_id).write_text("Du texte.", encoding="utf-8")
+    jobs.update_job(job_id, status="converting")
+    resp = client.post(f"/api/books/{job_id}/reconvert", json={"engine": "fake"})
+    assert resp.status_code == 409
+
+
+def test_reconvert_unknown_engine_rejected(client, tmp_path):
+    job_id = jobs.create_job(title="livre", language="fr", engine="fake")
+    jobs.text_path(job_id).write_text("Du texte.", encoding="utf-8")
+    jobs.update_job(job_id, status="done")
+    resp = client.post(f"/api/books/{job_id}/reconvert", json={"engine": "edge"})
+    assert resp.status_code == 400
 
 
 def test_second_convert_after_done_rejected(client, tmp_path):
