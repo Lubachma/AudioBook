@@ -916,7 +916,7 @@ function renderHero() {
   document.getElementById("hero-title").textContent = book.title;
 
   const cardAudio = cards.get(book.id)?.querySelector("audio");
-  let sub = "at " + fmtTime(book.position_seconds);
+  let sub = "resumed at " + fmtTime(book.position_seconds);
   if (cardAudio && isFinite(cardAudio.duration) && cardAudio.duration > 0) {
     sub += ` · ${fmtDurationApprox(cardAudio.duration - book.position_seconds)} left`;
   }
