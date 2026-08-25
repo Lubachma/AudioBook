@@ -184,7 +184,7 @@ def test_convert_unavailable_engine_rejected(client, monkeypatch):
 def test_index_served(client):
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "Livres audio" in resp.text
+    assert "Audiobooks" in resp.text
 
 
 def test_voices_endpoint_lists_engine_voices(client):

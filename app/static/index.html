@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Livres audio</title>
+<title>Audiobooks</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#0f1115">
 <link rel="icon" type="image/png" href="/icons/icon-192.png">
@@ -83,13 +83,13 @@
 </style>
 </head>
 <body>
-<header><h1>📖 → 🎧 Livres audio</h1><div class="muted" id="engine-info"></div></header>
+<header><h1>📖 → 🎧 Audiobooks</h1><div class="muted" id="engine-info"></div></header>
 <main>
   <div class="card" id="resume-hero">
     <div class="book-head">
       <div class="cover-box" id="hero-cover">📖</div>
       <div class="book-info">
-        <div class="muted">Continuer l'écoute</div>
+        <div class="muted">Continue listening</div>
         <div><strong id="hero-title"></strong></div>
         <div class="muted" id="hero-sub"></div>
       </div>
@@ -100,13 +100,13 @@
   <div class="card" id="upload-card">
     <form id="upload-form">
       <input type="file" id="file" accept=".pdf,.epub,application/pdf,application/epub+zip" multiple required>
-      <select id="engine" title="Moteur de synthèse"></select>
-      <select id="voice" title="Voix de lecture"></select>
+      <select id="engine" title="TTS engine"></select>
+      <select id="voice" title="Narration voice"></select>
       <select id="language">
-        <option value="fr">Français</option>
+        <option value="fr">French</option>
         <option value="en">English</option>
       </select>
-      <button type="submit" class="btn-primary">Ajouter (PDF ou EPUB — dépôt direct possible)</button>
+      <button type="submit" class="btn-primary">Add (PDF or EPUB — drag-and-drop supported)</button>
       <div class="muted" id="engine-note"></div>
       <div id="upload-progress-box">
         <progress id="upload-progress" max="100" value="0"></progress>
@@ -117,14 +117,14 @@
 
   <div class="card">
     <details class="bench" id="bench">
-      <summary>🎧 Banc d'essai des voix — écouter et choisir la voix par défaut</summary>
+      <summary>🎧 Voice test bench — listen and choose the default voice</summary>
       <div class="bench-controls">
         <select id="bench-engine"></select>
         <select id="bench-language">
-          <option value="fr">Français</option>
+          <option value="fr">French</option>
           <option value="en">English</option>
         </select>
-        <button class="btn-primary btn-small" id="bench-generate">Générer les extraits</button>
+        <button class="btn-primary btn-small" id="bench-generate">Generate samples</button>
       </div>
       <div class="muted" id="bench-sample"></div>
       <div id="bench-voices"></div>
@@ -132,20 +132,20 @@
   </div>
 
   <div id="library-bar">
-    <input type="search" id="search" placeholder="Rechercher un livre…">
+    <input type="search" id="search" placeholder="Search for a book…">
     <select id="sort">
-      <option value="recent">Récents</option>
-      <option value="title">Titre A→Z</option>
-      <option value="status">En cours d'abord</option>
+      <option value="recent">Recent</option>
+      <option value="title">Title A→Z</option>
+      <option value="status">In progress first</option>
     </select>
-    <button class="btn-small" id="view-toggle" title="Basculer liste/grille">🔳</button>
+    <button class="btn-small" id="view-toggle" title="Toggle list/grid">🔳</button>
   </div>
   <div id="books"></div>
   <div id="books-grid"></div>
 </main>
 
 <script>
-const STATUS_LABELS = { extracting: "Extraction…", extracted: "Prêt", queued: "En attente", converting: "Conversion…", done: "Terminé", error: "Erreur" };
+const STATUS_LABELS = { extracting: "Extracting…", extracted: "Ready", queued: "Queued", converting: "Converting…", done: "Done", error: "Error" };
 const READ_SPEED_CHARS_PER_SEC = 15.5; // débit moyen d'un livre audio en français
 const cards = new Map(); // id -> élément DOM, pour ne pas recréer les lecteurs en cours d'écoute
 const voiceNames = new Map(); // voice_id -> nom affichable
@@ -186,7 +186,7 @@ async function loadConfig() {
     for (const eng of CONFIG.engines) {
       const opt = document.createElement("option");
       opt.value = eng.name;
-      opt.textContent = eng.label + (eng.available ? "" : " — indisponible");
+      opt.textContent = eng.label + (eng.available ? "" : " — unavailable");
       if (!eng.available) { opt.disabled = true; opt.title = eng.reason; }
       select.appendChild(opt);
     }
@@ -198,7 +198,7 @@ async function loadConfig() {
 
   const active = CONFIG.engines.filter((e) => e.available).map((e) => e.label.split(" (")[0]);
   document.getElementById("engine-info").textContent =
-    active.length ? "Moteurs : " + active.join(", ") : "Aucun moteur disponible — voir le README.";
+    active.length ? "Engines: " + active.join(", ") : "No engine available — see the README.";
 
   await loadVoices();
   document.getElementById("engine").addEventListener("change", loadVoices);
@@ -210,8 +210,8 @@ function updateEngineNote() {
   if (!engine) { note.textContent = ""; return; }
   if (!engine.available) { note.textContent = "⚠ " + engine.reason; return; }
   note.textContent = engine.name === "elevenlabs"
-    ? "Moteur cloud payant : consomme le quota mensuel ElevenLabs."
-    : "Moteur local : gratuit et illimité, généré sur le Mac.";
+    ? "Paid cloud engine: consumes the monthly ElevenLabs quota."
+    : "Local engine: free and unlimited, generated on the Mac.";
 }
 
 async function fetchVoiceOptions(engineName) {
@@ -226,13 +226,13 @@ function fillVoiceSelect(select, voices, preferredVoice) {
     for (const v of voices) {
       const opt = document.createElement("option");
       opt.value = v.voice_id;
-      opt.textContent = v.name + (v.category === "cloned" ? " (clonée)" : "");
+      opt.textContent = v.name + (v.category === "cloned" ? " (cloned)" : "");
       select.appendChild(opt);
     }
     select.value = voices.some((v) => v.voice_id === preferredVoice) ? preferredVoice : voices[0].voice_id;
   } else {
-    voiceNames.set(preferredVoice || "", "Voix par défaut");
-    select.innerHTML = `<option value="${preferredVoice || ""}">Voix par défaut</option>`;
+    voiceNames.set(preferredVoice || "", "Default voice");
+    select.innerHTML = `<option value="${preferredVoice || ""}">Default voice</option>`;
   }
 }
 
@@ -240,7 +240,7 @@ async function loadVoices() {
   const engineName = document.getElementById("engine").value;
   const select = document.getElementById("voice");
   updateEngineNote();
-  select.innerHTML = '<option value="">Chargement des voix…</option>';
+  select.innerHTML = '<option value="">Loading voices…</option>';
   const voices = await fetchVoiceOptions(engineName);
   fillVoiceSelect(select, voices, (engineByName(engineName) || {}).default_voice || "");
 }
@@ -257,7 +257,7 @@ function uploadOne(file, onProgress) {
       try { detail = JSON.parse(xhr.responseText).detail || ""; } catch (e) { /* réponse non JSON */ }
       resolve({ ok: xhr.status < 300, detail });
     };
-    xhr.onerror = () => resolve({ ok: false, detail: "serveur injoignable" });
+    xhr.onerror = () => resolve({ ok: false, detail: "server unreachable" });
     const data = new FormData();
     data.append("file", file);
     data.append("language", document.getElementById("language").value);
@@ -270,7 +270,7 @@ function uploadOne(file, onProgress) {
 async function uploadFiles(fileList) {
   const files = [...fileList].filter((f) => /\.(pdf|epub)$/i.test(f.name));
   const skipped = fileList.length - files.length;
-  if (!files.length) { alert("Aucun fichier PDF ou EPUB dans la sélection."); return; }
+  if (!files.length) { alert("No PDF or EPUB file in the selection."); return; }
   const box = document.getElementById("upload-progress-box");
   const bar = document.getElementById("upload-progress");
   const label = document.getElementById("upload-label");
@@ -281,14 +281,14 @@ async function uploadFiles(fileList) {
     const prefix = files.length > 1 ? `${i + 1}/${files.length} · ` : "";
     const result = await uploadOne(file, (frac) => {
       bar.value = Math.round(frac * 100);
-      label.textContent = `${prefix}${file.name} · ${Math.round(frac * 100)} %`;
+      label.textContent = `${prefix}${file.name} · ${Math.round(frac * 100)}%`;
     });
-    if (!result.ok) errors.push(`${file.name} : ${result.detail || "échec"}`);
+    if (!result.ok) errors.push(`${file.name}: ${result.detail || "failed"}`);
     refresh();
   }
   box.style.display = "none";
   const notes = [];
-  if (skipped) notes.push(`${skipped} fichier(s) ignoré(s) (ni PDF ni EPUB)`);
+  if (skipped) notes.push(`${skipped} file(s) skipped (not PDF or EPUB)`);
   if (errors.length) notes.push(errors.join("\n"));
   if (notes.length) alert(notes.join("\n"));
 }
@@ -321,9 +321,9 @@ function bookEngine(book) { return book.engine || CONFIG.default_engine; }
 
 function estimateLine(book) {
   const audioSec = book.char_count / READ_SPEED_CHARS_PER_SEC;
-  let line = `≈ ${fmtDurationApprox(audioSec)} d'audio`;
+  let line = `≈ ${fmtDurationApprox(audioSec)} of audio`;
   const cpm = (engineByName(bookEngine(book)) || {}).chars_per_min || 0;
-  if (cpm > 0) line += ` · génération ≈ ${fmtDurationApprox(book.char_count / cpm * 60)}`;
+  if (cpm > 0) line += ` · generation ≈ ${fmtDurationApprox(book.char_count / cpm * 60)}`;
   return line;
 }
 
@@ -340,29 +340,29 @@ function conversionEta(book) {
   progressSamples.set(book.id, entry);
   if (!entry.rate || !book.total_chunks) return "";
   const remaining = (book.total_chunks - book.done_chunks) / entry.rate;
-  return remaining > 5 ? ` · reste ≈ ${fmtDurationApprox(remaining)}` : "";
+  return remaining > 5 ? ` · ≈ ${fmtDurationApprox(remaining)} left` : "";
 }
 
 function formatChars(book) {
-  const chars = book.char_count.toLocaleString("fr-FR") + " caractères";
+  const chars = book.char_count.toLocaleString("en-US") + " characters";
   if (book.engine === "elevenlabs") {
     const pct = (book.char_count / CONFIG.monthly_quota_chars * 100).toFixed(0);
-    return chars + " ≈ " + pct + " % du quota mensuel";
+    return chars + " ≈ " + pct + "% of the monthly quota";
   }
-  return chars + " (gratuit, local)";
+  return chars + " (free, local)";
 }
 
 function latestBookById(id) { return latestBooks.find((b) => b.id === id); }
 
 function buildCancelBtn(book) {
-  return mkBtn("✕ Annuler", async () => {
+  return mkBtn("✕ Cancel", async () => {
     const ok = confirm(
-      "Arrêter la génération de « " + book.title + " » ?\n" +
-      "Les segments déjà créés sont conservés : « Convertir » reprendra au même endroit."
+      "Stop generating \"" + book.title + "\"?\n" +
+      "Segments already created are kept: \"Convert\" will resume where it left off."
     );
     if (!ok) return;
     const resp = await fetch(`/api/books/${book.id}/cancel`, { method: "POST" });
-    if (!resp.ok) alert((await resp.json()).detail || "Échec de l'annulation");
+    if (!resp.ok) alert((await resp.json()).detail || "Failed to cancel");
     refresh();
   }, "btn-danger btn-small");
 }
@@ -381,7 +381,7 @@ function buildConvertingCard(body, book) {
   const details = document.createElement("details");
   details.className = "chapters";
   const summary = document.createElement("summary");
-  summary.textContent = "▶ Pré-écouter pendant la génération (voix réelle du livre)";
+  summary.textContent = "▶ Preview while generating (the book's actual voice)";
   const audio = document.createElement("audio");
   audio.controls = true;
   audio.preload = "none";
@@ -396,23 +396,23 @@ function buildConvertingCard(body, book) {
     state.waiting = false;
     audio.src = `/api/books/${book.id}/chunks/${i}`;
     audio.play().catch(() => {});
-    status.textContent = `segment ${i} — ${doneCount()} déjà générés`;
+    status.textContent = `segment ${i} — ${doneCount()} already generated`;
     if (i + 1 <= doneCount()) new Audio(`/api/books/${book.id}/chunks/${i + 1}`); // préchargement
   };
   details.addEventListener("toggle", () => {
     if (details.open && state.idx === 0) {
       if (doneCount() >= 1) startAt(1);
-      else { state.waiting = true; status.textContent = "aucun segment prêt pour l'instant…"; }
+      else { state.waiting = true; status.textContent = "no segment ready yet…"; }
     }
   });
   audio.addEventListener("ended", () => {
     if (state.idx + 1 <= doneCount()) startAt(state.idx + 1);
-    else { state.waiting = true; status.textContent = "segment suivant en cours de génération…"; }
+    else { state.waiting = true; status.textContent = "generating the next segment…"; }
   });
   // Appelé à chaque polling : reprend automatiquement quand le segment attendu arrive.
   body._liveTick = () => {
     if (state.waiting && state.idx + 1 <= doneCount() && details.open) startAt(state.idx + 1);
-    else if (state.idx > 0 && !state.waiting) status.textContent = `segment ${state.idx} — ${doneCount()} déjà générés`;
+    else if (state.idx > 0 && !state.waiting) status.textContent = `segment ${state.idx} — ${doneCount()} already generated`;
   };
 
   body.append(bar, label, row, details);
@@ -523,7 +523,7 @@ function buildPlayer(body, book) {
     if (!isFinite(audio.duration) || audio.duration <= 0) return;
     strip.querySelector(".fill").style.width = (audio.currentTime / audio.duration * 100) + "%";
     strip.querySelector(".t-elapsed").textContent = fmtTime(audio.currentTime);
-    strip.querySelector(".t-remaining").textContent = "reste " + fmtTime(audio.duration - audio.currentTime);
+    strip.querySelector(".t-remaining").textContent = fmtTime(audio.duration - audio.currentTime) + " left";
     const idx = currentChapterIndex();
     strip.querySelector(".t-chapter").textContent =
       chapters.length > 1 && idx >= 0 ? `ch. ${idx + 1}/${chapters.length}` : "";
@@ -539,7 +539,7 @@ function buildPlayer(body, book) {
     buildTicks();
     if (chapters.length < 2) return;
     const summary = document.createElement("summary");
-    summary.textContent = `Chapitres (${chapters.length})`;
+    summary.textContent = `Chapters (${chapters.length})`;
     chapDetails.appendChild(summary);
     chapterRows = chapters.map((ch) => {
       const row = document.createElement("div");
@@ -548,7 +548,7 @@ function buildPlayer(body, book) {
       time.className = "chapter-time";
       time.textContent = fmtTime(ch.start);
       const label = document.createElement("span");
-      label.textContent = ch.title || "Chapitre";
+      label.textContent = ch.title || "Chapter";
       row.append(time, label);
       row.onclick = () => { audio.currentTime = ch.start; audio.play(); };
       chapDetails.appendChild(row);
@@ -563,8 +563,8 @@ function buildPlayer(body, book) {
   timerNote.className = "timer-note";
   const sleepSelect = document.createElement("select");
   sleepSelect.className = "btn-small";
-  sleepSelect.title = "Minuterie de sommeil";
-  for (const [value, label] of [["off", "🌙 off"], ["15", "🌙 15 min"], ["30", "🌙 30 min"], ["45", "🌙 45 min"], ["60", "🌙 60 min"], ["chapter", "🌙 fin du chapitre"]]) {
+  sleepSelect.title = "Sleep timer";
+  for (const [value, label] of [["off", "🌙 off"], ["15", "🌙 15 min"], ["30", "🌙 30 min"], ["45", "🌙 45 min"], ["60", "🌙 60 min"], ["chapter", "🌙 end of chapter"]]) {
     const opt = document.createElement("option");
     opt.value = value; opt.textContent = label;
     sleepSelect.appendChild(opt);
@@ -578,7 +578,7 @@ function buildPlayer(body, book) {
     if (sleepSelect.value === "chapter") {
       sleepDeadline = null;
       sleepChapterStart = currentChapterIndex();
-      timerNote.textContent = "jusqu'à la fin du chapitre";
+      timerNote.textContent = "until the end of the chapter";
     } else {
       sleepChapterStart = null;
       sleepDeadline = Date.now() + parseInt(sleepSelect.value, 10) * 60000;
@@ -602,7 +602,7 @@ function buildPlayer(body, book) {
       ? [{ src: `/api/books/${book.id}/cover`, sizes: "600x900", type: "image/jpeg" }]
       : [{ src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" }];
     navigator.mediaSession.metadata = new MediaMetadata({
-      title: book.title, artist: voiceLabel || "Livres audio", album: "Livres audio", artwork,
+      title: book.title, artist: voiceLabel || "Audiobooks", album: "Audiobooks", artwork,
     });
     const on = (action, handler) => {
       try { navigator.mediaSession.setActionHandler(action, handler); } catch (e) { /* non supporté */ }
@@ -659,7 +659,7 @@ function buildPlayer(body, book) {
     const m4b = document.createElement("a");
     m4b.href = `/api/books/${book.id}/audio.m4b`;
     m4b.textContent = "M4B";
-    m4b.title = "Livre audio chapitré avec pochette (app Livres)";
+    m4b.title = "Chaptered audiobook with cover (Books app)";
     row.append(m4b);
   }
   body.append(audio, strip, row, chapDetails);
@@ -669,7 +669,7 @@ function buildPlayer(body, book) {
 
 function buildReconvertPanel(body, book) {
   const holder = document.createElement("div");
-  const trigger = mkBtn("🔁 Autre voix", async () => {
+  const trigger = mkBtn("🔁 Change voice", async () => {
     trigger.style.display = "none";
     const panel = document.createElement("div");
     panel.className = "row";
@@ -694,17 +694,17 @@ function buildReconvertPanel(body, book) {
     };
     engineSel.onchange = loadPanelVoices;
     await loadPanelVoices();
-    const go = mkBtn("Lancer", async () => {
+    const go = mkBtn("Start", async () => {
       go.disabled = true;
       const resp = await fetch(`/api/books/${book.id}/reconvert`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ engine: engineSel.value, voice_id: voiceSel.value }),
       });
-      if (!resp.ok) { alert((await resp.json()).detail || "Échec"); go.disabled = false; return; }
+      if (!resp.ok) { alert((await resp.json()).detail || "Failed"); go.disabled = false; return; }
       refresh();
     }, "btn-primary btn-small");
-    const cancel = mkBtn("Annuler", () => { panel.remove(); trigger.style.display = ""; });
+    const cancel = mkBtn("Cancel", () => { panel.remove(); trigger.style.display = ""; });
     panel.append(engineSel, voiceSel, go, cancel);
     holder.appendChild(panel);
   });
@@ -766,11 +766,11 @@ function updateCard(book) {
     const note = document.createElement("div");
     note.className = "muted";
     note.textContent = estimateLine(book);
-    body.append(note, makeConvertBtn("Convertir en audio"));
+    body.append(note, makeConvertBtn("Convert to audio"));
   } else if (book.status === "queued") {
     const note = document.createElement("div");
     note.className = "muted";
-    note.textContent = "Dans la file d'attente — la synthèse démarre dès que le Mac est libre.";
+    note.textContent = "Queued — synthesis starts as soon as the Mac is free.";
     const row = document.createElement("div");
     row.className = "row";
     row.append(buildCancelBtn(book));
@@ -785,12 +785,12 @@ function updateCard(book) {
   } else if (book.status === "error") {
     const msg = document.createElement("div");
     msg.className = "warn";
-    msg.textContent = book.error || "Erreur inconnue.";
+    msg.textContent = book.error || "Unknown error.";
     body.appendChild(msg);
     // Reprise possible si le texte a été extrait (les segments déjà générés
     // ne sont pas re-générés)
     if (book.char_count > 0) {
-      body.appendChild(makeConvertBtn("Réessayer la conversion"));
+      body.appendChild(makeConvertBtn("Retry conversion"));
       buildReconvertPanel(body, book);
     }
   }
@@ -801,9 +801,9 @@ function updateCard(book) {
     if (!row.querySelector(".btn-danger")) {
       const del = document.createElement("button");
       del.className = "btn-danger btn-small";
-      del.textContent = "Supprimer";
+      del.textContent = "Delete";
       del.onclick = async () => {
-        if (!confirm("Supprimer « " + book.title + " » ?")) return;
+        if (!confirm("Delete \"" + book.title + "\"?")) return;
         await fetch(`/api/books/${book.id}`, { method: "DELETE" });
         cards.get(book.id)?.remove();
         cards.delete(book.id);
@@ -823,7 +823,7 @@ function sortedFilteredBooks() {
   const q = (document.getElementById("search").value || "").toLowerCase();
   let list = latestBooks.filter((b) => !q || b.title.toLowerCase().includes(q));
   const mode = document.getElementById("sort").value;
-  if (mode === "title") list = [...list].sort((a, b) => a.title.localeCompare(b.title, "fr"));
+  if (mode === "title") list = [...list].sort((a, b) => a.title.localeCompare(b.title, "en"));
   else if (mode === "status") list = [...list].sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9));
   return list; // "recent" : ordre serveur (created_at desc)
 }
@@ -916,9 +916,9 @@ function renderHero() {
   document.getElementById("hero-title").textContent = book.title;
 
   const cardAudio = cards.get(book.id)?.querySelector("audio");
-  let sub = "repris à " + fmtTime(book.position_seconds);
+  let sub = "at " + fmtTime(book.position_seconds);
   if (cardAudio && isFinite(cardAudio.duration) && cardAudio.duration > 0) {
-    sub += ` · reste ${fmtDurationApprox(cardAudio.duration - book.position_seconds)}`;
+    sub += ` · ${fmtDurationApprox(cardAudio.duration - book.position_seconds)} left`;
   }
   document.getElementById("hero-sub").textContent = sub;
 
@@ -951,7 +951,7 @@ async function refreshBench() {
   const resp = await fetch(`/api/previews?engine=${engine}&language=${language}`);
   if (!resp.ok) return;
   const data = await resp.json();
-  document.getElementById("bench-sample").textContent = "Extrait lu : « " + data.sample_text + " »";
+  document.getElementById("bench-sample").textContent = "Sample text: \"" + data.sample_text + "\"";
   const container = document.getElementById("bench-voices");
   const engineCfg = engineByName(engine) || {};
 
@@ -970,14 +970,14 @@ async function refreshBench() {
     if (!rowEl.isConnected) container.appendChild(rowEl);
 
     rowEl.querySelector(".default-mark").textContent =
-      engineCfg.default_voice === v.voice_id && CONFIG.default_engine === engine ? "⭐ voix par défaut" : "";
+      engineCfg.default_voice === v.voice_id && CONFIG.default_engine === engine ? "⭐ default voice" : "";
 
     const statusEl = rowEl.querySelector(".status");
     statusEl.className = "status" + (v.status === "error" ? " error" : "");
     statusEl.textContent = {
-      missing: "extrait non généré",
-      pending: "génération en cours…",
-      error: "erreur : " + v.error,
+      missing: "sample not generated",
+      pending: "generating…",
+      error: "error: " + v.error,
       ready: "",
     }[v.status];
 
@@ -994,7 +994,7 @@ async function refreshBench() {
     if (v.status === "ready" && !actions.querySelector("button")) {
       const setDefault = document.createElement("button");
       setDefault.className = "btn-primary btn-small";
-      setDefault.textContent = "⭐ Définir comme voix par défaut";
+      setDefault.textContent = "⭐ Set as default voice";
       setDefault.onclick = async () => {
         const resp = await fetch("/api/settings", {
           method: "PUT",
@@ -1022,7 +1022,7 @@ document.getElementById("bench-generate").addEventListener("click", async () => 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ engine, language, all: true }),
   });
-  if (!resp.ok) { alert((await resp.json()).detail || "Échec"); return; }
+  if (!resp.ok) { alert((await resp.json()).detail || "Failed"); return; }
   refreshBench();
 });
 
