@@ -28,7 +28,7 @@ Speech synthesis runs **fully locally** (free, unlimited, nothing leaves the Mac
 Requires [Homebrew](https://brew.sh), `brew install uv ffmpeg`.
 
 ```bash
-git clone <repo-url> && cd AudioBook
+git clone https://github.com/Lubachma/AudioBook.git && cd AudioBook
 ./scripts/install.sh          # venvs + dependencies + models (~16 GB, long)
 .venv/bin/python scripts/design_voices.py   # builds the French narrative voices
 ```
