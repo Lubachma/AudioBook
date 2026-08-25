@@ -22,7 +22,7 @@ from .base import Engine, TTSError, Voice
 
 class KyutaiEngine(Engine):
     name = "kyutai"
-    label = "Kyutai TTS (local, gratuit, voix fr natives)"
+    label = "Kyutai TTS (local, free, native FR voices)"
     chunk_max_chars = 1500
     chunk_ext = "wav"
     is_local = True

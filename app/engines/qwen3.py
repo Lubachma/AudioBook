@@ -28,7 +28,7 @@ _LANG_CODES = {"fr": "french", "en": "english"}
 
 class Qwen3Engine(Engine):
     name = "qwen3"
-    label = "Qwen3-TTS (local, gratuit)"
+    label = "Qwen3-TTS (local, free)"
     chunk_max_chars = 1500
     chunk_ext = "wav"
     is_local = True
@@ -59,7 +59,7 @@ class Qwen3Engine(Engine):
             for wav in sorted(settings.voices_dir.glob("*.wav")):
                 if wav.with_suffix(".txt").exists():
                     label = wav.stem.replace("_", " ").replace("-", " ").capitalize()
-                    voices.append(Voice(f"ref:{wav.stem}", f"{label} (voix designée)", "designed", "fr"))
+                    voices.append(Voice(f"ref:{wav.stem}", f"{label} (designed voice)", "designed", "fr"))
         voices.extend(Voice(vid, name, "preset", "en") for vid, name in self.PRESET_SPEAKERS)
         return voices
 

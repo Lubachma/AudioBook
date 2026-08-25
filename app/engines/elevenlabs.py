@@ -98,7 +98,7 @@ def fetch_account_voices(
 
 class ElevenLabsEngine(Engine):
     name = "elevenlabs"
-    label = "ElevenLabs (cloud, quota payant)"
+    label = "ElevenLabs (cloud, paid quota)"
     chunk_ext = "mp3"
     is_local = False
 
