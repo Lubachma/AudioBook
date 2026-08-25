@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Apple Silicon runner: the MLX dependencies (mlx-audio, mlx-whisper)
+    # only ship wheels for macOS arm64.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra local --extra dev
+
+      - name: Run fast test suite (engines mocked, no model downloads)
+        run: uv run pytest
