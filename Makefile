@@ -1,9 +1,9 @@
-# Commandes du projet — « make » ou « make help » pour la liste.
+# Project commands — run "make" or "make help" for the list.
 #
-# Le serveur tourne comme LaunchAgent macOS (KeepAlive) : un simple kill le
-# relancerait aussitôt. On l'arrête donc via launchctl bootout (make stop) ;
-# le service revient au prochain login ou avec make start. Pour qu'il ne
-# revienne plus du tout : make service-remove.
+# The server runs as a macOS LaunchAgent (KeepAlive): a plain kill would get
+# restarted immediately. It is therefore stopped via launchctl bootout
+# (make stop); the service comes back at next login or with make start.
+# To remove it for good: make service-remove.
 
 LABEL   := com.audiobook.server
 PLIST   := $(HOME)/Library/LaunchAgents/$(LABEL).plist
@@ -16,69 +16,69 @@ VOICE  ?= ref:claire
 .DEFAULT_GOAL := help
 .PHONY: help start stop restart status logs run install service-install service-remove sync test test-slow voices bench
 
-help: ## Affiche cette aide
+help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
-start: ## Démarre le serveur (service launchd, port 8765)
+start: ## Start the server (launchd service, port 8765)
 	@if [ ! -f "$(PLIST)" ]; then ./scripts/install_service.sh; exit 0; fi
 	@for i in 1 2 3 4 5; do \
 		launchctl print "gui/$(UID_NUM)/$(LABEL)" >/dev/null 2>&1 && break; \
 		launchctl bootstrap "gui/$(UID_NUM)" "$(PLIST)" 2>/dev/null && break; \
-		[ $$i -eq 5 ] && { echo "Échec du bootstrap launchd après 5 tentatives." >&2; exit 1; }; \
+		[ $$i -eq 5 ] && { echo "launchd bootstrap failed after 5 attempts." >&2; exit 1; }; \
 		sleep 2; \
 	done
 	@launchctl kickstart "gui/$(UID_NUM)/$(LABEL)"
-	@echo "Serveur démarré : $(URL)"
+	@echo "Server started: $(URL)"
 
-stop: ## Arrête le serveur (make start pour relancer ; revient aussi au prochain login)
+stop: ## Stop the server (make start to relaunch; it also comes back at next login)
 	@if launchctl bootout "gui/$(UID_NUM)/$(LABEL)" 2>/dev/null; then \
-		echo "Serveur arrêté. « make start » pour le relancer (il reviendra aussi au prochain login)."; \
+		echo "Server stopped. Run 'make start' to relaunch it (it also comes back at next login)."; \
 	else \
-		echo "Serveur déjà arrêté."; \
+		echo "Server already stopped."; \
 	fi
 
-restart: ## Redémarre le serveur
+restart: ## Restart the server
 	@if launchctl print "gui/$(UID_NUM)/$(LABEL)" >/dev/null 2>&1; then \
 		launchctl kickstart -k "gui/$(UID_NUM)/$(LABEL)"; \
-		echo "Serveur redémarré : $(URL)"; \
+		echo "Server restarted: $(URL)"; \
 	else \
 		$(MAKE) start; \
 	fi
 
-status: ## État du service launchd + réponse HTTP
+status: ## launchd service state + HTTP check
 	@launchctl print "gui/$(UID_NUM)/$(LABEL)" 2>/dev/null \
 		| grep -E '^[[:space:]]+(state|pid) =' \
-		|| echo "Service non chargé (make start pour le démarrer)."
+		|| echo "Service not loaded (make start to start it)."
 	@curl -fsS -o /dev/null -m 3 "$(URL)/api/config" \
-		&& echo "HTTP OK : $(URL)" \
-		|| echo "HTTP KO : pas de réponse sur $(URL)."
+		&& echo "HTTP OK: $(URL)" \
+		|| echo "HTTP DOWN: no response at $(URL)."
 
-logs: ## Suit les logs du serveur (Ctrl-C pour quitter)
+logs: ## Follow the server logs (Ctrl-C to quit)
 	@tail -n 50 -f "$(HOME)/Library/Logs/audiobook.out.log" "$(HOME)/Library/Logs/audiobook.err.log"
 
-run: ## Serveur en avant-plan avec rechargement auto (faire make stop d'abord : même port)
+run: ## Foreground server with auto-reload (run make stop first: same port)
 	.venv/bin/uvicorn app.main:app --port 8765 --reload
 
-install: ## Installe venvs + dépendances + modèles (~16 Go, long)
+install: ## Install venvs + dependencies + models (~16 GB, takes a while)
 	./scripts/install.sh
 
-service-install: ## (Ré)installe le LaunchAgent et démarre le serveur
+service-install: ## (Re)install the LaunchAgent and start the server
 	./scripts/install_service.sh
 
-service-remove: ## Désinstalle le LaunchAgent (ne revient plus au login)
+service-remove: ## Uninstall the LaunchAgent (no longer comes back at login)
 	./scripts/install_service.sh --remove
 
-sync: ## Met à jour les dépendances Python (uv sync --extra local --extra dev)
+sync: ## Update Python dependencies (uv sync --extra local --extra dev)
 	uv sync --extra local --extra dev
 
-test: ## Tests rapides (moteurs mockés)
+test: ## Fast test suite (mocked engines)
 	uv run pytest
 
-test-slow: ## Tests d'intégration réels (modèles locaux, minutes)
+test-slow: ## Real integration tests (local models, takes minutes)
 	uv run pytest -m slow -s
 
-voices: ## (Re)fabrique les voix françaises designées (data/voices/)
+voices: ## (Re)build the designed French voices (data/voices/)
 	.venv/bin/python scripts/design_voices.py
 
-bench: ## Banc de vitesse TTS — variables : ENGINE=qwen3 VOICE=ref:claire
+bench: ## TTS speed benchmark — variables: ENGINE=qwen3 VOICE=ref:claire
 	.venv/bin/python scripts/bench_tts.py --engine "$(ENGINE)" --voice "$(VOICE)"
